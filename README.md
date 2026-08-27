@@ -1,270 +1,155 @@
-# Trading System — Kronos + StatArb + News
+Financial Trading System — Kronos + Regime Layer + News Risk Pipeline
+Исследовательская торговая система: foundation-модель временных рядов Kronos,
+детектор рыночного режима с послережимным сайзингом, событийный новостной
+риск-контур (RSS → e5-фильтр → LLM) и полный журнал решений.
+Рынки: акции MOEX (Tinkoff) и крипта (Bybit). Курсовой проект / research sandbox.
 
-Интегрированная система статистического арбитража с Kronos-прогнозом и новостным слоем.
+Статус: pre-soak frozen state. Бэктесты v2 завершены (режимный слой
+измерен на двух рынках), следующий шаг — 21-дневный live soak-test
+на VM с журналом решений как источником истины.
 
----
-
-## Архитектура
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         main.py CLI                          │
-│         backtest | live | pairs | news                       │
-└────────────┬──────────────────────────┬─────────────────────┘
-             │                          │
-    ┌────────▼───────┐        ┌─────────▼──────────┐
-    │ BacktestEngine │        │    LiveEngine       │
-    │  (sync loop)   │        │  (async event loop) │
-    └────────┬───────┘        └─────────┬───────────┘
-             │                          │
-             └───────────┬──────────────┘
+Архитектура
+text
+                        main.py CLI
+              backtest | live | news
+                 │              │
+        ┌────────▼─────┐  ┌─────▼──────────┐
+        │BacktestEngine│  │  LiveEngine    │  (async event loop, 60s tick)
+        └────────┬─────┘  └─────┬──────────┘
+                 └───────┬──────┘
                          │
-              ┌──────────▼──────────┐
-              │   StatArbStrategy   │  ← on_bar(state) → List[Order]
-              │                     │
-              │  ┌─────────────┐    │
-              │  │  Spread /   │    │
-              │  │  Z-score    │    │
-              │  └──────┬──────┘    │
-              │         │           │
-              │  ┌──────▼──────┐    │
-              │  │   Kronos    │    │  ← KronosAdapter.encode_prices()
-              │  │   Filter    │    │     → KronosState (rich object)
-              │  └──────┬──────┘    │
-              │         │           │
-              │  ┌──────▼──────┐    │
-              │  │    News     │    │  ← NewsSignalExtractor.refresh()
-              │  │   Filter    │    │     → MarketState.news[ticker]
-              │  └─────────────┘    │
-              └─────────────────────┘
+            ┌────────────▼─────────────┐
+            │   AITacticStrategy       │  ← on_bar(state) → List[Order]
+            │                          │
+            │  1. Kronos forecast      │  KronosAdapter → direction + expected_return
+            │  2. Regime layer         │  RegimeDetector(OHLCV) → режим →
+            │     (site sizing)        │  regime_multiplier(режим, сторона) [0.2–1.4]
+            │  3. News risk dampener   │  effective_risk → factor 0.3–0.7 / block
+            └────────────┬─────────────┘
                          │
-              ┌──────────▼──────────┐
-              │    RiskManager      │  ← check_order / check_positions / check_drawdown
-              └──────────┬──────────┘
+            ┌────────────▼─────────────┐
+            │   NewsRiskPipeline       │  (событийная модель)
+            │  RSS(30s) → e5-filter →  │  DeepSeek только на релевантное,
+            │  dedup → DeepSeek → TTL  │  cap 20 вызовов/цикл
+            └────────────┬─────────────┘
                          │
-              ┌──────────▼──────────┐
-              │      Portfolio      │  ← apply_order → MarketState
-              └──────────┬──────────┘
+            ┌────────────▼─────────────┐
+            │      RiskManager         │  лимиты, stop/take, drawdown halt
+            ├──────────────────────────┤
+            │      TradeJournal        │  SQLite: КАЖДОЕ решение с контекстом
+            │  (opened/skipped/closed, │  (режим, множитель, риск, rationale)
+            │   outcomes T+1h/4h/24h)  │
+            └────────────┬─────────────┘
                          │
-              ┌──────────▼──────────┐
-              │  ExecutionRouter    │  ← TinkoffClient (sandbox / prod)
-              └─────────────────────┘
-```
+            ┌────────────▼─────────────┐
+            │     ExecutionRouter      │  Tinkoff (MOEX) / Bybit (testnet)
+            └──────────────────────────┘
+Ключевые компоненты
+Regime layer (src/regime/regime_detector.py)
+Офлайн-классификация бара в один из режимов (BULL_TREND, BEAR_TREND,
+HIGH_VOL_CHOP, RANGE_BOUND, RANGE_SQUEEZE, RALLY_FRENZY, RECOVERY, CRASH)
+по OHLCV-признакам. Измеренные в бэктесте множители сайзинга
+(режим × сторона × класс актива) применяются к размеру позиции:
+усиливаем плюсовые режимы (до ×1.4), душим минусовые (до ×0.2).
+Чистая функция, детерминированная, walk-forward совместимая.
 
----
+TradeJournal (src/engine/trade_journal.py)
+SQLite-журнал всех решений (не только сделок): открытия, пропуски с причиной,
+закрытия, исходы T+1h/4h/24h. Включая сделки, которые режимный слой
+пропустил бы — для контрфактического what-if анализа.
 
-## Компоненты
+NewsRiskPipeline (src/news_agent_client/)
+rss_collector.py — непрерывный опрос фидов (Interfax, РБК, Finam,
+МосБиржа, крипто-фиды), poll ~30 сек;
 
-### MarketState (`src/engine/market_state.py`)
-Единственный источник правды. Содержит:
-- `cash`, `prices`, `positions`, `trades`, `pnl_history`
-- `news: Dict[str, NewsSnapshot]` — текущий новостной контекст по тикерам
+keyword_filter.py — локальный e5-small фильтр релевантности, бесплатно;
 
-### NewsSnapshot
-Агрегированный срез новостей по тикеру:
-- `sentiment` [-1, +1] — взвешенный по relevance сентимент
-- `relevance` [0, 1]
-- `sanction_risk` [0, 1] — доля очень негативных новостей
-- `signal_weight` property — комбинированный вес для сигнала
+news_risk_pipeline.py — дедупликация по item_id, TTL-память
+(short=3 дня, long=14 дней, линейное затухание), cap 20 LLM-вызовов/цикл;
 
-### StatArbStrategy (`src/signals/strategy.py`)
-Комбинирует три слоя:
-1. **Spread z-score** — основной сигнал (коинтеграция)
-2. **Kronos confidence filter** — блокирует вход при низкой уверенности модели
-3. **News filter** — блокирует при санкционном риске > 60%, ослабляет при конфликте
+news_deep_dive.py — единственная точка вызова LLM (OpenAI-совместимый
+клиент, DeepSeek по умолчанию; base_url/model — из конфига).
+Строгий JSON: risk_category, severity, materiality, sentiment, horizon.
+Fail-closed: при ошибке API возвращает None, прежний риск сохраняется.
+Ключ читается из env DEEPSEEK_API_KEY.
 
-Адаптивный порог входа:
-```
-entry_threshold = entry_threshold_sigma * (1 + volatility_norm * 0.5)
-```
+Стратегии
+src/signals/ai_tactic_strategy.py — основная: Kronos + режимный
+множитель + новостной демпфер;
 
-### NewsSignalExtractor (`src/signals/news_signal.py`)
-Мост между `NewsAgentClient` и `MarketState`:
-```python
-extractor.refresh(state, tickers=["GAZP", "LKOH"])
-state.news["GAZP"].signal_weight  # [-1, +1]
-```
+src/engine/kronos_default_strategy.py — базовая Kronos-стратегия
+(первичные watch_terms для новостного фильтра).
 
-### RiskManager (`src/engine/risk_manager.py`)
-- `check_order()` — позиционные лимиты, резерв кэша
-- `check_positions()` → автоматические SELL-ордера при stop_loss / take_profit
-- `check_drawdown()` → halt при превышении max_drawdown
+Аналитика (analysis/)
+backtest_kronos.py, run_experiment.py — прогоны бэктестов;
 
-### KronosAdapter (`src/kronos_layer/kronos_adapter.py`)
-Rich KronosState с properties:
-- `forecast_median`, `expected_return`, `volatility`, `volatility_norm`
-- `confidence` — 1 - volatility_norm (чем уже канал → выше уверенность)
-- `direction` — +1 / -1 / 0
+regime_report.py — распределение режимов, hit-rate и PnL по ячейкам;
 
----
+whatif_regime.py — контрфактический анализ режимных множителей;
 
-## Структура файлов
+smoke_regime.py — офлайн-проверка связки (1 минута, обязательна
+перед любым запуском);
 
-```
-src/
-├── engine/
-│   ├── config_loader.py      # EngineConfig, RiskConfig, StrategyConfig, load_engine_config
-│   ├── market_state.py       # MarketState, Position, Trade, NewsSnapshot
-│   ├── orders.py             # Order, OrderSide, OrderStatus
-│   ├── portfolio.py          # Portfolio.apply_order (BUY/SELL cash logic)
-│   ├── risk_manager.py       # RiskManager (NEW)
-│   ├── backtest_engine.py    # BacktestEngine (с RiskManager)
-│   └── live_engine.py        # LiveEngine (async, с news polling)
-│
-├── executors/
-│   ├── tinkoff_client.py     # TinkoffClient (dynamic instrument_type filter)
-│   └── execution_router.py   # ExecutionRouter (lot-size aware, retry backoff)
-│
-├── kronos_layer/
-│   ├── kronos_adapter.py     # KronosAdapter + KronosState (rich object)
-│   └── kronos_features.py    # KronosFeatures, extract_features
-│
-├── models/
-│   └── cointegration.py      # find_cointegrated_pairs (NEW, Engle-Granger + half-life)
-│
-├── signals/
-│   ├── data_collector.py     # DataCollector
-│   ├── features.py           # build_features (Kronos + rolling z-score)
-│   ├── news_signal.py        # NewsSignalExtractor (NEW)
-│   ├── pair_selector.py      # PairSelector → cointegration.py
-│   ├── preprocessor.py       # resample, log_returns
-│   ├── signal_generation.py  # SignalGenerator (адаптивные пороги)
-│   └── signal_types.py       # TradingSignal (с kronos_state, news_snapshot)
-│
-├── news_agent_client/
-│   ├── client.py             # NewsAgentClient (local SQLite / HTTP)
-│   ├── llm_backend.py        # LLMBackend (OpenAI / DeepSeek)
-│   └── mappers.py            # HTTP response mappers
-│
-└── utils/
-    ├── logging_config.py
-    ├── math_utils.py         # sharpe, max_drawdown, cagr
-    ├── serialization.py
-    └── time_utils.py
+journal_report.py — отчёт по журналу решений (после soak'а).
 
-collectors/                   # Новостной блок (отдельный репо)
-├── rss_collector.py          # RSS + HTML fallback
-└── telegram_collector.py     # Telethon (async-safe run())
+Структура
+text
+_test_project/
+├── analysis/            # бэктесты, режимные отчёты, smoke-тесты
+├── configs/             # engine / kronos / news_agent / llm_* (без ключей!)
+│                        # ключи: *.key.yaml и llm_shared.yaml — локально, в .gitignore
+├── src/
+│   ├── engine/          # live_engine, backtest_engine, risk_manager,
+│   │                    # trade_journal, market_state, portfolio, orders
+│   ├── executors/       # tinkoff_client, bybit_client, routers, lot_utils
+│   ├── kronos_layer/    # kronos_adapter (KronosState), kronos_features
+│   ├── regime/          # regime_detector
+│   ├── news_agent_client/  # rss_collector, keyword_filter, news_risk_pipeline,
+│   │                     # news_deep_dive, ticker_intelligence, llm_backend
+│   ├── services/        # deepseek_news_analyzer, news_db_migration
+│   ├── signals/         # ai_tactic_strategy и базовые сигналы
+│   ├── llm_strategist/  # стратегический LLM-слой (posture/size)
+│   └── utils/
+└── tests/               # e2e и smoke тесты
 
-configs/
-├── engine.yaml               # tickers, signal, risk секции
-├── kronos.yaml               # model_name, pred_len, device
-├── news_agent.yaml           # transport, llm, db_path
-├── thresholds.yaml           # (deprecated, перенесено в engine.yaml)
-├── sandbox_key.yaml          # tinkoff.token (sandbox)
-└── prod_key.yaml             # tinkoff.token (prod)
+Kronos/                  # модель — отдельный репо, клонируется рядом:
+                         # git clone https://github.com/shiyu-coder/Kronos.git
+Установка и запуск
+bash
+# 1. Код + модель
+git clone <этот репо> && cd <репо>
+git clone https://github.com/shiyu-coder/Kronos.git
 
-tests/
-├── conftest.py
-├── test_portfolio.py
-├── test_risk_manager.py
-├── test_cointegration.py
-└── test_news_signal.py
-```
-
----
-
-## Установка (venv)
-
-### Новый venv (рекомендуется для изоляции от других проектов)
-```bash
+# 2. Окружение (CPU-сборка torch — отдельно, до requirements)
 cd _test_project
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
+python3 -m venv .venv && source .venv/bin/activate   # Win: .venv\Scripts\activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r ../requirements.txt
 
-### Использовать уже существующий venv (если там уже стоят torch/tinkoff-investments)
-Можно безопасно переиспользовать вену другого проекта — `pip install -r requirements.txt`
-только добавит недостающие пакеты, ничего не удалит и не сломает другой проект:
-```bash
-source /path/to/other_project/.venv/bin/activate
-cd /path/to/_test_project
-pip install -r requirements.txt
-```
-Единственный риск: если другой проект потом обновит версию какого-то пакета (например pandas), трейдинг-бот
-может неожиданно получить несовместимую версию. На раннем этапе/тестах это
-адекватный компромисс — когда бот уйдёт в live/прод, стоит выделить ему отдельный venv.
+# 3. Секреты (локально, не в git)
+#    configs/*key*.yaml, configs/llm_shared.yaml
+#    .env: DEEPSEEK_API_KEY=sk-...
 
-### Ключи API
-```bash
-export DEEPSEEK_API_KEY="sk-..."
-export TINKOFF_TOKEN="t....."          # имя переменной см. в configs/tinkoff.yaml
-```
-Ни один из сервисов (DeepSeek, Tinkoff) не работает без вашего собственного ключа/токена —
-оба API требуют авторизацию, у агента нет доступа к ним без них.
+# 4. Предстартовая проверка (офлайн, обязательна)
+python analysis/smoke_regime.py
 
----
-
-## Запуск
-
-### Бэктест
-```bash
-python -m src.main backtest --config configs/engine.yaml
-```
-
-### Поиск пар
-```bash
-python -m src.main pairs --config configs/engine.yaml --save pairs.json
-```
-
-### Live (sandbox)
-```bash
-python -m src.main live --mode sandbox --config configs/engine.yaml
-```
-
-### Новости
-```bash
-python -m src.main news --ticker GAZP --hours 24 --summarize
-```
-
-### Тесты
-```bash
+# 5. Запуск
+python src/main.py live --mode sandbox          # soak / sandbox
+python src/main.py backtest --config configs/engine.yaml
 pytest tests/ -v
-```
+Запуск под tmux на VM — лог переживает разрыв SSH:
+tmux new -s soak → запуск → Ctrl+B, D.
 
----
+Методология (важнее кода)
+Все изменения слоёв сначала измеряются на замороженных бэктестах
+(v2: 245 сделок крипта, 127 акции), потом попадают в прод;
 
-## Конфигурация engine.yaml
+Магнитудам прогноза Kronos не доверяем (не откалиброваны) —
+используем направление и hit-rate; ожидаемые доходности для
+cost-гейта берём из измеренного EV ячеек журнала;
 
-```yaml
-tickers: [GAZP, LKOH, ...]
+Live soak-test 21 день на testnet: журнал решений — единственный
+источник истины для out-of-sample оценки;
 
-instrument:
-  type: share       # динамический фильтр TinkoffClient
-  currency: rub
-
-signal:
-  pvalue_threshold: 0.05
-  entry_threshold_sigma: 2.0   # адаптивный: * (1 + vol_norm * 0.5)
-  exit_threshold_sigma: 0.5
-  min_confidence: 0.55         # Kronos confidence gate
-  news_alpha: 0.30             # вес новостного сигнала
-
-risk:
-  max_position_pct: 0.20
-  max_drawdown: 0.20
-  stop_loss_pct: 0.05
-  take_profit_pct: 0.15
-  max_open_positions: 10
-  min_cash_pct: 0.05
-```
-
----
-
-## Порядок интеграции
-
-Текущая фаза (готово):
-1. ✅ StatArb движок с Kronos
-2. ✅ RiskManager (stop/take/drawdown)
-3. ✅ TinkoffClient (sandbox / prod)
-4. ✅ Бэктест с реальными данными
-5. ✅ NewsSignalExtractor (подключён к MarketState)
-
-Следующая фаза:
-6. 🔲 Загрузить реальные исторические данные (OHLCV из Tinkoff)
-7. 🔲 Подключить локальную SQLite с новостями (или запустить news-agent)
-8. 🔲 Установить Kronos (`pip install chronos-forecasting`) и запустить на GPU
-9. 🔲 Запустить sandbox бэктест с реальными данными
-10. 🔲 Переход в live sandbox режим
+Одна переменная за эксперимент: смена риск-LLM, порогов и слоёв
+— только между soak'ами, никогда посередине.
