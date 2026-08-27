@@ -1,0 +1,33 @@
+news_agent:
+  transport: local
+  local_db_path: data/news.db   
+
+  max_docs_per_ticker: 100
+  llm_summarize: false
+
+  llm:
+    max_tokens: 1500
+    temperature: 0.3
+
+  retrieval:
+    max_text_chars: 3000
+    prefilter_limit: 60
+    context_top_n: 8
+    snippet_len: 1000
+    min_rank_score: 0.15
+
+  default_hours_back: 6
+
+  migration:
+    backfill_existing: false
+
+rss:
+  poll_interval_sec: 300
+  request_timeout: 15
+  feeds:
+    interfax_business: "https://www.interfax.ru/rss.asp"
+    rbc_economics: "https://rssexport.rbc.ru/rbcnews/news/30/full.rss"
+    finam_news: "https://www.finam.ru/analysis/conews/rsspoint/"
+    moex_disclosure: "https://www.e-disclosure.ru/rss.aspx"
+    forklog: "https://forklog.com/feed/"
+    google_btc: "https://news.google.com/rss/search?q=bitcoin+OR+BTC&hl=ru&gl=RU&ceid=RU:ru"

@@ -1,0 +1,9 @@
+# configs/kronos.yaml
+model_name: NeoQuasar/Kronos-base
+tokenizer_name: NeoQuasar/Kronos-Tokenizer-base
+device: cpu          # смени на cuda:0 если есть GPU — Kronos-base (102.3M) заметно медленнее на CPU
+max_context: 512      # хардлимит для small/base, увеличивать нельзя
+prediction_length: 120
+sample_count: 8
+temperature: 1.0
+top_p: 0.9

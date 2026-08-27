@@ -1,0 +1,16 @@
+**/*key*.yaml
+**/*secret*.yaml
+**/deepseek_news.yaml
+.env
+Kronos/
+**/data/
+**/logs/
+*.log
+*.db
+*.sqlite
+_test_project/analysis/results/
+.venv/
+venv/
+__pycache__/
+*.pyc
+_test_project/configs/llm_shared.yaml
