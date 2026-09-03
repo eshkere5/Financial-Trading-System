@@ -16,7 +16,6 @@ from datetime import datetime
 from src.utils.time_utils import utcnow
 from typing import Dict, List, Optional
 
-from src.utils.time_utils import utcnow
 
 
 def _clamp(value: float, low: float, high: float) -> float:
