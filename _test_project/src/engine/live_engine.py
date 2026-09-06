@@ -20,6 +20,16 @@ from src.utils.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
+# TEMP до risk-policy v2: минимумы биржи в базовых единицах.
+# size_multiplier стратега применяется ПОСЛЕ exchange-min bump
+# стратегии и может опустить qty ниже минимума биржи.
+try:
+    from src.signals.ai_tactic_strategy import (
+        BYBIT_LINEAR_MIN_QTY as _EXCHANGE_MIN_QTY,
+    )
+except ImportError:
+    _EXCHANGE_MIN_QTY = {"BTCUSDT": 0.001, "ETHUSDT": 0.01}
+
 PRICE_POLL_INTERVAL = 60
 NEWS_POLL_INTERVAL = 300
 RISK_CHECK_INTERVAL = 30
@@ -280,6 +290,8 @@ class LiveEngine:
         """
         loop = asyncio.get_running_loop()
         total_cash = 0.0
+        broker_equity_total = 0.0
+        broker_equity_sources: list[str] = []
         all_broker_tickers: set = set()
         reconcile_complete = True   # ### FIXED 2026-08-02 (Fix B) ###
         queried_brokers = 0
@@ -308,10 +320,29 @@ class LiveEngine:
 
             queried_brokers += 1
             raw_positions = broker_portfolio.get("positions", [])
-            broker_cash = broker_portfolio.get(
-                "cash", broker_portfolio.get("total_amount", 0.0)
-            )
-            total_cash += float(broker_cash or 0.0)
+            accounting_mode = str(
+                broker_portfolio.get("accounting_mode", "spot")
+            ).lower()
+
+            if accounting_mode == "broker_equity":
+                broker_equity = float(
+                    broker_portfolio.get("broker_equity", 0.0) or 0.0
+                )
+                if broker_equity > 0:
+                    broker_equity_total += broker_equity
+                    broker_equity_sources.append(name)
+                else:
+                    reconcile_complete = False
+                    logger.warning(
+                        "[RECONCILE:%s] broker_equity missing/invalid",
+                        name,
+                    )
+            else:
+                broker_cash = broker_portfolio.get(
+                    "cash",
+                    broker_portfolio.get("total_amount", 0.0),
+                )
+                total_cash += float(broker_cash or 0.0)
 
             for p in raw_positions:
                 ticker = p.get("ticker") or p.get("symbol")
@@ -372,21 +403,44 @@ class LiveEngine:
                 )
                 del self._state.positions[ticker]
 
-        # ### FIXED 2026-08-02 (Fix B) ###
-        # Cash обновляем только по полной сверке: сумма по части брокеров
-        # занижает equity и через portfolio_value искажает drawdown-стоп.
-        if reconcile_complete and total_cash > 0:
+        # Accounting mode must not mix spot cash with derivatives equity.
+        # For Bybit linear/inverse, totalEquity already includes UPL.
+        if reconcile_complete and broker_equity_total > 0:
+            self._state.accounting_mode = "broker_equity"
+            self._state.broker_equity = broker_equity_total
+            self._state.broker_equity_source = ",".join(
+                broker_equity_sources
+            )
+            # Kept only as an informational mirror for legacy logs.
+            self._state.cash = broker_equity_total
+        elif reconcile_complete and total_cash > 0:
+            self._state.accounting_mode = "spot"
+            self._state.broker_equity = None
+            self._state.broker_equity_source = None
             self._state.cash = total_cash
-        elif total_cash > 0:
+        elif broker_equity_total > 0 or total_cash > 0:
             logger.warning(
-                "[RECONCILE] Cash не обновлён (получено %.2f по %d брокерам из %d) — сверка неполная",
-                total_cash, queried_brokers, len(self._routers),
+                "[RECONCILE] Account values not updated — incomplete "
+                "reconciliation (cash=%.2f broker_equity=%.2f brokers=%d/%d)",
+                total_cash,
+                broker_equity_total,
+                queried_brokers,
+                len(self._routers),
             )
 
         logger.info(
-            "[RECONCILE] Synced: %d positions, cash=%.2f (brokers=%s, complete=%s)",
-            len(self._state.positions), self._state.cash,
-            list(self._routers.keys()), reconcile_complete,
+            "[RECONCILE] Synced: %d positions, cash=%.2f "
+            "broker_equity=%s source=%s brokers=%s complete=%s",
+            len(self._state.positions),
+            self._state.cash,
+            (
+                f"{self._state.broker_equity:.2f}"
+                if self._state.broker_equity is not None
+                else "none"
+            ),
+            self._state.broker_equity_source or "spot",
+            list(self._routers.keys()),
+            reconcile_complete,
         )
 
         if not self._baseline_synced:
@@ -774,6 +828,8 @@ class LiveEngine:
 
         while self._running:
             try:
+                feed = getattr(self, "_regime_feed", None)
+                price_regimes = feed.refresh(self._state.prices) if feed else None
                 context = build_context(
                     self._state, self._strategies, recent_pnl=list(self._state.pnl_history)
                 )
@@ -860,6 +916,17 @@ class LiveEngine:
 
             if not is_closing and d.size_multiplier != 1.0:
                 order.qty = order.qty * d.size_multiplier
+                # Exchange-min re-bump: множитель стратега применяется
+                # ПОСЛЕ bump стратегии и может опустить qty ниже
+                # минимума биржи — тогда роутер убьёт ордер.
+                _min_qty = _EXCHANGE_MIN_QTY.get(order.ticker)
+                if _min_qty and 0 < order.qty < _min_qty:
+                    order.qty = _min_qty * 1.02
+                    logger.info(
+                        "[strategist-filter] re-bump %s -> qty=%.6f "
+                        "(size_multiplier=%.2f ниже минимума биржи)",
+                        order.ticker, order.qty, d.size_multiplier,
+                    )
                 if order.qty <= 0:
                     logger.info("size_multiplier=%.3f → qty≈0, ордер %s пропущен",
                                 d.size_multiplier, order.ticker)

@@ -48,22 +48,39 @@ class Portfolio:
         comm = cost * self._commission
         is_buy = order.side == OrderSide.BUY
 
-        # ── проверка кэша ─────────────────────────────────────────────
-        if is_buy and self._state.cash < cost + comm:
-            logger.warning(
-                "Insufficient cash for %s: need %.2f, have %.2f",
-                order.ticker, cost + comm, self._state.cash,
-            )
-            order.mark_rejected("insufficient_cash")
-            return False
+        accounting_mode = getattr(
+            self._state,
+            "accounting_mode",
+            "spot",
+        )
 
-        # ── обновление кэша ───────────────────────────────────────────
-        # BUY: cash уменьшается на cost + comm
-        # SELL: cash увеличивается на cost - comm (комиссия из выручки)
-        if is_buy:
-            self._state.cash -= cost + comm
+        # Spot: reserve full purchase cost locally.
+        # Linear/inverse derivatives: broker equity is authoritative and
+        # cash changes only on reconciliation; full notional is never spent.
+        if accounting_mode == "spot":
+            if is_buy and self._state.cash < cost + comm:
+                logger.warning(
+                    "Insufficient cash for %s: need %.2f, have %.2f",
+                    order.ticker,
+                    cost + comm,
+                    self._state.cash,
+                )
+                order.mark_rejected("insufficient_cash")
+                return False
+
+            if is_buy:
+                self._state.cash -= cost + comm
+            else:
+                self._state.cash += cost - comm
         else:
-            self._state.cash += cost - comm
+            logger.info(
+                "DERIVATIVE FILL | ticker=%s side=%s qty=%.8f "
+                "notional=%.8f — cash deferred to reconciliation",
+                order.ticker,
+                order.side.value,
+                order.qty,
+                cost,
+            )
 
         # ── обновление позиции ────────────────────────────────────────
         sign = 1 if is_buy else -1

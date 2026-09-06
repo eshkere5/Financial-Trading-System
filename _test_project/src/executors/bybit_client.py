@@ -171,43 +171,131 @@ class BybitClient:
 
 
     def get_portfolio(self) -> Dict[str, Any]:
-        resp = self.get_wallet_balance()
-        result = resp.get("result", {})
-        accounts = result.get("list", [])
-        if not accounts:
-            return {"total_amount": 0.0, "positions_count": 0, "positions": []}
+        """
+        Returns a normalized broker portfolio.
 
-        acc = accounts[0]
-        total_equity = float(acc.get("totalEquity", 0.0) or 0.0)
+        For spot accounts, `cash` is locally usable cash and MarketState
+        calculates equity as cash plus marked spot positions.
+
+        For linear/inverse derivatives, Bybit `totalEquity` is authoritative:
+        it already includes wallet balances, collateral valuation and
+        unrealized PnL. Therefore MarketState must not add position notional
+        to it again.
+        """
+        response = self.get_wallet_balance()
+        accounts = response.get("result", {}).get("list", [])
+
+        if not accounts:
+            return {
+                "cash": 0.0,
+                "total_amount": 0.0,
+                "broker_equity": None,
+                "accounting_mode": "broker_equity",
+                "broker": "bybit",
+                "positions_count": 0,
+                "positions": [],
+            }
+
+        account = accounts[0]
+        total_equity = float(
+            account.get("totalEquity", 0.0) or 0.0
+        )
 
         if self.category not in ("linear", "inverse"):
-            return {"total_amount": total_equity, "positions_count": 0, "positions": []}
+            return {
+                "cash": total_equity,
+                "total_amount": total_equity,
+                "broker_equity": None,
+                "accounting_mode": "spot",
+                "broker": "bybit",
+                "positions_count": 0,
+                "positions": [],
+            }
 
-        pos_resp = self._call(
-            self.session.get_positions, write=False, category=self.category, settleCoin="USDT"
+        positions_response = self._call(
+            self.session.get_positions,
+            write=False,
+            category=self.category,
+            settleCoin="USDT",
         )
-        raw_positions = pos_resp.get("result", {}).get("list", [])
-        positions = []
+
+        raw_positions = (
+            positions_response.get("result", {}).get("list", [])
+        )
+
+        positions: List[Dict[str, Any]] = []
 
         for raw_position in raw_positions:
             size = float(raw_position.get("size", 0.0) or 0.0)
+
             if size <= 0:
                 continue
 
             side = str(raw_position.get("side", "")).lower()
             signed_qty = -size if side == "sell" else size
 
+            symbol = str(raw_position.get("symbol", "")).upper()
+            avg_price = float(
+                raw_position.get("avgPrice", 0.0) or 0.0
+            )
+
+            if not symbol or avg_price <= 0:
+                logger.warning(
+                    "Skipping invalid Bybit position: symbol=%s "
+                    "size=%s avgPrice=%s",
+                    symbol,
+                    size,
+                    avg_price,
+                )
+                continue
+
             positions.append(
                 {
-                    "symbol": raw_position["symbol"],
+                    "symbol": symbol,
                     "qty": signed_qty,
-                    "avg_price": float(raw_position.get("avgPrice", 0.0) or 0.0),
+                    "avg_price": avg_price,
                     "unrealised_pnl": float(
-                        raw_position.get("unrealisedPnl", 0.0) or 0.0
+                        raw_position.get(
+                            "unrealisedPnl",
+                            0.0,
+                        ) or 0.0
                     ),
                 }
             )
-        return {"total_amount": total_equity, "positions_count": len(positions), "positions": positions}
+
+        return {
+            # Compatibility fields for old callers.
+            "cash": total_equity,
+            "total_amount": total_equity,
+
+            # Derivatives accounting contract.
+            "broker_equity": total_equity,
+            "accounting_mode": "broker_equity",
+            "broker": "bybit",
+
+            # Diagnostics only. Do not rebuild totalEquity from them.
+            "wallet_balance": float(
+                account.get("totalWalletBalance", 0.0) or 0.0
+            ),
+            "unrealized_pnl": float(
+                account.get("totalPerpUPL", 0.0) or 0.0
+            ),
+            "available_balance": float(
+                account.get(
+                    "totalAvailableBalance",
+                    0.0,
+                ) or 0.0
+            ),
+            "initial_margin": float(
+                account.get(
+                    "totalInitialMargin",
+                    0.0,
+                ) or 0.0
+            ),
+
+            "positions_count": len(positions),
+            "positions": positions,
+        }
 
     def submit_order_simple(
         self,
@@ -328,8 +416,9 @@ class BybitClient:
                 spec = {"qty_step": 1.0, "min_order_qty": 0.0}
             else:
                 lot_filter = items[0].get("lotSizeFilter", {})
+                step = lot_filter.get("qtyStep") or lot_filter.get("basePrecision") or "1.0"
                 spec = {
-                    "qty_step": float(lot_filter.get("qtyStep", 1.0) or 1.0),
+                    "qty_step": float(step),
                     "min_order_qty": float(lot_filter.get("minOrderQty", 0.0) or 0.0),
                 }
             self._instrument_cache[symbol] = spec

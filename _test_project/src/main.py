@@ -141,7 +141,7 @@ def _cmd_live(args: argparse.Namespace) -> None:
             poll_interval_sec=int(risk_cfg.get("poll_interval_sec", 30)),
         )
         analyzer = NewsDeepDiveAnalyzer(
-            llm_cfg=merge_llm_section(risk_cfg.get("llm", {})),
+            cfg=merge_llm_section(risk_cfg.get("llm", {})),
         )
 
         # LiveEngine перезапишет on_assessment своим thread-safe callback
@@ -154,37 +154,79 @@ def _cmd_live(args: argparse.Namespace) -> None:
             ttl_days=risk_cfg.get("ttl_days", {"short": 3, "long": 14}),
         )
 
+        # Seed watch_terms через AliasGenerator (DeepSeek) — как KronosDefaultStrategy.seed_watch_terms
+        try:
+            from src.news_agent_client.ticker_intelligence import AliasGenerator
+            _alias_gen = AliasGenerator(merge_llm_section(risk_cfg.get("llm", {})))
+            _generated = _alias_gen.generate(["BTCUSDT", "ETHUSDT"])
+            _watch_terms = {t: list({t, *terms})[:8] for t, terms in _generated.items()}
+            news_pipeline.update_watch_terms(_watch_terms, "startup")
+            logger.info("Watch terms seeded | tickers=%d | %s",
+                        len(_watch_terms), {t: len(v) for t, v in _watch_terms.items()})
+        except Exception as exc:
+            logger.warning("AliasGenerator seed failed: %s — контур стартует пустым", exc)
+
         logger.info(
             "News pipeline configured | filter=%s | poll=%ss",
             risk_cfg.get("filter_mode", "keyword"),
             rss_cfg.poll_interval_sec,
         )
     # ── UniverseSelector ───────────────────────────────────────────
-    tinkoff_client = TinkoffClient(token=token, sandbox=(args.mode == "sandbox"))
-    universe_selector = UniverseSelector(
-        tinkoff_client=tinkoff_client,
-        news_client=news_client if news_extractor else None,
-        cfg=cfg.universe,
-    )
-    initial_universe = universe_selector.get_universe()
+    # Crypto-only sandbox: не создаём TinkoffClient и не выполняем
+    # сетевой запрос UniverseSelector с US VM.
+    universe_selector = None
+    initial_universe = None
     logger.info(
-        "UniverseSelector | initial tickers=%d source=%s",
-        len(initial_universe.tickers), initial_universe.source,
+        "UniverseSelector skipped | crypto-only Bybit sandbox"
     )
 
     # ── AITacticStrategy ────────────────────────────────────────────
 
+    _sig = (lambda k, d: signal_cfg.get(k, d)) if isinstance(signal_cfg, dict) else (lambda k, d: getattr(signal_cfg, k, d))
+    _tac = yaml.safe_load(Path("configs/engine.yaml").read_text(encoding="utf-8")).get("tactic", {})
     tactic_cfg = AITacticConfig(
-        min_conviction=getattr(signal_cfg, "min_conviction", 0.35),
-        qty_per_trade=getattr(signal_cfg, "qty_per_trade", 100.0),
-        max_positions=getattr(signal_cfg, "max_positions", 10),
+        min_conviction=float(_tac.get("min_conviction", 0.35)),
+        qty_per_trade=float(_tac.get("qty_per_trade", 100.0)),
+        max_positions=int(_tac.get("max_positions", 10)),
     )
+    logger.info("Tactic cfg | qty=%s min_conv=%s", _tac.get("qty_per_trade"), _tac.get("min_conviction"))
+    # OHLCV warmup: дневные klines Bybit (публичный эндпоинт) — кормит regime-слой и Kronos
+    ohlcv = {}
+    try:
+        import requests
+        import pandas as pd
+        for _t in ["BTCUSDT", "ETHUSDT"]:
+            _r = requests.get(
+                "https://api-testnet.bybit.com/v5/market/kline",
+                params={"category": "spot", "symbol": _t, "interval": "D", "limit": 200},
+                timeout=15,
+            )
+            _rows = list(reversed(_r.json()["result"]["list"]))
+            ohlcv[_t] = pd.DataFrame({
+                "date":   pd.to_datetime([int(x[0]) for x in _rows], unit="ms"),
+                "open":   [float(x[1]) for x in _rows],
+                "high":   [float(x[2]) for x in _rows],
+                "low":    [float(x[3]) for x in _rows],
+                "close":  [float(x[4]) for x in _rows],
+                "volume": [float(x[5]) for x in _rows],
+            }).set_index("date")
+        logger.info("OHLCV warmup | %s", {t: len(df) for t, df in ohlcv.items()})
+    except Exception as exc:
+        logger.warning("OHLCV warmup failed: %s — regime/Kronos спят", exc)
     strategy = AITacticStrategy(
         cfg=tactic_cfg,
         kronos=kronos,
-        news_extractor=news_extractor,
+        ohlcv=ohlcv,
     )
-    strategy.set_universe(initial_universe.tickers)
+    strategy.set_universe(["BTCUSDT", "ETHUSDT"])  # crypto-only soak
+    # прогрев _regime_cache до первого стратег-полла
+    for _t in list(strategy.tickers):
+        try:
+            strategy._regime_for(_t)
+        except Exception:
+            pass
+    logger.info("Regime cache primed | %s",
+                {t: getattr(v[1], "regime", "?") for t, v in strategy._regime_cache.items()})
 
     # ── LLMStrategist (DeepSeek V4) ─────────────────────────────────
     strategist = None
@@ -203,11 +245,13 @@ def _cmd_live(args: argparse.Namespace) -> None:
     engine = LiveEngine(
         cfg=cfg,
         mode=args.mode,
-        token=token,
+        token=None,  # crypto-only: tinkoff router skipped (geo-block с US-IP)
+        enable_bybit=True,
+        bybit_category="linear",
         news_pipeline=news_pipeline,
         strategist=strategist,
         strategist_poll_interval=strategist_interval,
-        universe_selector=universe_selector,
+        universe_selector=None,  # не дёргать Tinkoff каждые 900с из strategist-loop
     )
     engine.register_strategy(strategy)
     strategy.set_journal(engine._portfolio._journal)

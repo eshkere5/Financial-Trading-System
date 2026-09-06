@@ -201,3 +201,25 @@ def test_sell_to_close_restores_cash_and_removes_position():
 
     assert "BTCUSDT" not in state.positions
     assert state.cash == pytest.approx(1020.0)
+
+
+def test_derivative_fill_does_not_change_cash():
+    portfolio, state = make_portfolio(
+        cash=1000.0,
+        commission=0.001,
+    )
+    state.accounting_mode = "broker_equity"
+    state.broker_equity = 1000.0
+
+    order = filled_order(
+        "BTCUSDT",
+        OrderSide.BUY,
+        0.001,
+        70000.0,
+        "linear-buy-1",
+    )
+
+    assert portfolio.apply_order(order) is True
+    assert state.cash == pytest.approx(1000.0)
+    assert state.positions["BTCUSDT"].qty == pytest.approx(0.001)
+    assert order.is_fully_filled is True

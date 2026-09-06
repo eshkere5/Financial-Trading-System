@@ -69,14 +69,20 @@ class RiskManager:
 
     def check_order(self, order: Order, state: MarketState) -> bool:
         if self._halted:
-            logger.warning("[RiskManager] Trading halted (%s) — order %s rejected", self._halted_reason, order.order_id)
-            order.status = OrderStatus.REJECTED
+            logger.warning(
+                "[RiskManager] Trading halted (%s) — order %s rejected",
+                self._halted_reason,
+                order.order_id,
+            )
+            order.mark_rejected(
+                f"trading_halted:{self._halted_reason or 'unknown'}"
+            )
             return False
 
         price = order.filled_price or state.prices.get(order.ticker)
         if price is None:
             logger.warning("[RiskManager] No price for %s", order.ticker)
-            order.status = OrderStatus.REJECTED
+            order.mark_rejected("missing_price")
             return False
 
         equity = state.portfolio_value
@@ -97,11 +103,18 @@ class RiskManager:
                 order.status = OrderStatus.REJECTED
                 return False
 
-        # Фикс С1: min_cash_pct применяется только к BUY — SELL увеличивает
-        # кэш, блокировать его из-за низкого кэша нельзя (мешает закрытию).
-        if order.side == OrderSide.BUY and state.cash - cost < equity * self.cfg.min_cash_pct:
-            logger.warning("[RiskManager] Min cash reserve violated for %s", order.ticker)
-            order.status = OrderStatus.REJECTED
+        # Spot-only cash reserve. For derivatives, full order notional is
+        # not paid from cash; broker equity/margin is reconciled separately.
+        if (
+            getattr(state, "accounting_mode", "spot") == "spot"
+            and order.side == OrderSide.BUY
+            and state.cash - cost < equity * self.cfg.min_cash_pct
+        ):
+            logger.warning(
+                "[RiskManager] Min cash reserve violated for %s",
+                order.ticker,
+            )
+            order.mark_rejected("min_cash_reserve")
             return False
 
         # Фикс С2: лимит числа открытых позиций — по признаку наращивания

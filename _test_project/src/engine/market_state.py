@@ -159,6 +159,12 @@ class MarketState:
     cash: float
     timestamp: datetime = field(default_factory=utcnow)
     prices: Dict[str, float] = field(default_factory=dict)
+
+    # Для derivatives broker возвращает totalEquity, уже включающий UPL.
+    # В таком режиме добавлять position notional в portfolio_value нельзя.
+    broker_equity: Optional[float] = None
+    broker_equity_source: Optional[str] = None
+    accounting_mode: str = "spot"
     positions: Dict[str, Position] = field(default_factory=dict)
     trades: List[Trade] = field(default_factory=list)
     pnl_history: List[tuple[datetime, float]] = field(default_factory=list)
@@ -171,11 +177,45 @@ class MarketState:
     def __post_init__(self) -> None:
         if not math.isfinite(self.cash):
             raise ValueError(f"Invalid cash: {self.cash}")
+
+        self.accounting_mode = str(
+            self.accounting_mode or "spot"
+        ).lower()
+        if self.accounting_mode not in {"spot", "broker_equity"}:
+            raise ValueError(
+                f"Invalid accounting_mode: {self.accounting_mode}"
+            )
+
+        if self.broker_equity is not None:
+            self.broker_equity = float(self.broker_equity)
+            if (
+                not math.isfinite(self.broker_equity)
+                or self.broker_equity <= 0
+            ):
+                raise ValueError(
+                    f"Invalid broker_equity: {self.broker_equity}"
+                )
+
         if self.initial_equity is None:
-            self.initial_equity = self.cash
+            self.initial_equity = (
+                self.broker_equity
+                if self.broker_equity is not None
+                else self.cash
+            )
 
     @property
     def portfolio_value(self) -> float:
+        # Derivatives / unified broker account:
+        # totalEquity already includes wallet balance and unrealized PnL.
+        # Never add full position notional a second time.
+        if (
+            self.accounting_mode == "broker_equity"
+            and self.broker_equity is not None
+        ):
+            return self.broker_equity
+
+        # Spot / cash account:
+        # equity equals free cash plus market value of held instruments.
         return self.cash + sum(
             pos.qty * self.prices.get(ticker, pos.avg_price)
             for ticker, pos in self.positions.items()
