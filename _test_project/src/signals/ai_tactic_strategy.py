@@ -7,20 +7,30 @@ AITacticStrategy — одиночные позиции по tactical_bias от L
 """
 
 from __future__ import annotations
+from src.utils.time_utils import utcnow
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from src.engine.market_state import MarketState, combined_confidence
 from src.engine.orders import Order, OrderSide, OrderType
-from src.news_agent_client.news_deep_dive import RISK_POLICY
+from src.news_agent_client.news_deep_dive import RISK_POLICY, evaluate_news_risk
 from src.signals.signal_types import TradingSignal
 from src.kronos_layer.kronos_adapter import KronosAdapter
 from src.kronos_layer.kronos_features import extract_features
 
 logger = logging.getLogger(__name__)
+
+# TEMP до risk-policy v2: минимумы notional ордеров Bybit linear
+# (BTCUSDT 0.001 BTC, ETHUSDT 0.01 ETH) для exchange-min bump.
+# В v2 значение будет браться из instrument spec роутера.
+BYBIT_LINEAR_MIN_NOTIONAL = {
+    "BTCUSDT": 85.0,
+    "ETHUSDT": 26.0,
+}
 
 # ── режимный слой (мягкий импорт: нет модуля — работаем как раньше) ──
 try:
@@ -34,6 +44,33 @@ except ImportError:
 NEWS_OVERRIDE_RISK = 0.7
 
 
+
+def calculate_order_size(
+    equity, entry, stop, conviction, regime_mult,
+    base_risk_frac=0.005, min_conviction=0.35, full_conviction=0.80,
+    conviction_gamma=1.5, drawdown_mult=1.0, portfolio_mult=1.0,
+    fee_pct=0.0011, slippage_pct=0.0005, max_notional_frac=0.50,
+):
+    """Сначала риск в деньгах R, затем notional = R / d_eff."""
+    if equity <= 0 or entry <= 0 or stop <= 0:
+        return 0.0, 0.0
+    if conviction < min_conviction or regime_mult <= 0:
+        return 0.0, 0.0
+    x = (conviction - min_conviction) / (full_conviction - min_conviction)
+    x = max(0.0, min(x, 1.0))
+    conviction_mult = x ** conviction_gamma
+    regime_size = max(0.0, min(regime_mult, 1.0))  # спека: только понижающие множители
+    drawdown_mult = max(0.0, min(drawdown_mult, 1.0))
+    portfolio_mult = max(0.0, min(portfolio_mult, 1.0))
+    risk_usd = equity * base_risk_frac * conviction_mult * regime_size * drawdown_mult * portfolio_mult
+    stop_pct = abs(entry - stop) / entry
+    d_eff = stop_pct + fee_pct + slippage_pct
+    if d_eff <= 0:
+        return 0.0, 0.0
+    raw_notional = risk_usd / d_eff
+    notional = min(raw_notional, equity * max_notional_frac)
+    return notional, notional / entry
+
 @dataclass
 class TacticalPosition:
     """Открытая одиночная позиция под тактику LLM (не пара)."""
@@ -46,7 +83,18 @@ class TacticalPosition:
 @dataclass
 class AITacticConfig:
     min_conviction: float = 0.35        # ниже — сигнал игнорируется
-    qty_per_trade: float = 100.0
+    qty_per_trade: float = 100.0        # legacy, не используется в сайзинге
+    risk_frac: float = 0.20             # доля equity на сделку при conviction=1.0
+    max_position_frac: float = 0.50     # жёсткий потолок доли equity на позицию
+    min_notional: float = 6.0           # ниже мин. ордера Bybit — пропуск
+    base_risk_frac: float = 0.005       # базовый допустимый убыток на сделку (0.5% equity)
+    full_conviction: float = 0.80       # выше — размер не растёт
+    conviction_gamma: float = 1.5
+    stop_distance_pct: float = 0.02     # волатильностный прокси стопа (= engine stop_pct)
+    fee_pct: float = 0.0011
+    slippage_pct: float = 0.0005
+    max_notional_frac: float = 0.50     # потолок нотационала одной позиции
+    max_gross_frac: float = 0.90        # потолок суммарной экспозиции портфеля
     max_positions: int = 10
     kronos_confirmation_required: bool = False  # true = Kronos должен подтвердить направление
     exit_on_bias_removed: bool = True   # закрывать, если тикер выпал из tactical_bias
@@ -83,6 +131,8 @@ class AITacticStrategy:
 
         self.tactical_bias: Dict[str, Dict[str, float]] = {}
         self._positions: Dict[str, TacticalPosition] = {}
+        # intent-таймстемпы: grace для pending-подтверждения
+        self._position_intent_at: Dict[str, object] = {}
         self.tickers: list = list(cfg.initial_tickers)
 
         # NEW 2026-08-24: журнал решений + кэш режимов + дедуп сигнатур
@@ -189,6 +239,34 @@ class AITacticStrategy:
     def on_bar(self, state: MarketState) -> List[Order]:
         orders: List[Order] = []
 
+        # ── sync shadow book with broker truth ──────────────
+        # Реальная позиция подтверждена только через
+        # MarketState.positions (broker fill / reconcile).
+        # Rejected/ниже минимума ордер не должен навсегда
+        # блокировать повторный вход (grace = PENDING_ORDER_TTL).
+        now_ts = utcnow()
+        for held in list(self._positions.keys()):
+            if held in getattr(state, "positions", {}):
+                continue
+            intent_ts = self._position_intent_at.get(held)
+            age = (
+                None if intent_ts is None
+                else (now_ts - intent_ts).total_seconds()
+            )
+            if intent_ts is None or age > 900:
+                logger.info(
+                    "AITacticStrategy: DROP phantom tactical "
+                    "position %s (no broker position, age=%s)",
+                    held, age,
+                )
+                del self._positions[held]
+                self._position_intent_at.pop(held, None)
+        logger.info(
+            "AITacticStrategy: on_bar | internal_positions=%s bias=%s prices=%s",
+            list(self._positions.keys()), list(self.tactical_bias.keys()),
+            list(state.prices.keys()),
+        )
+
         # 1. закрыть позиции, чья тактика исчезла/развернулась
         for ticker in list(self._positions.keys()):
             pos = self._positions[ticker]
@@ -220,6 +298,10 @@ class AITacticStrategy:
             for ticker, bias in self.tactical_bias.items():
                 if ticker in self._positions:
                     continue
+                # Реальная позиция от брокера (reconcile/fill) —
+                # не докупаем поверх неё после рестарта.
+                if ticker in getattr(state, "positions", {}):
+                    continue
                 if ticker not in state.prices:
                     continue
                 if len(self._positions) >= self.cfg.max_positions:
@@ -235,22 +317,13 @@ class AITacticStrategy:
 
     @staticmethod
     def _risk_action(news) -> str:
-        """pass | dampen | block — делегирует в NewsSnapshot/RISK_POLICY."""
-        if news is None or getattr(news, "risk_category", "none") == "none":
-            return "pass"
-        policy = RISK_POLICY.get(news.risk_category)
-        if not policy:
-            return "pass"
-        if news.effective_risk >= policy["threshold"]:
-            return policy["action"]
-        return "pass"
+        action, _, _ = evaluate_news_risk(news)
+        return action
 
     @staticmethod
     def _risk_dampen_factor(news) -> float:
-        policy = RISK_POLICY.get(getattr(news, "risk_category", "none"))
-        if policy and policy.get("action") == "dampen":
-            return float(policy.get("factor", 1.0))
-        return 1.0
+        action, multiplier, _ = evaluate_news_risk(news)
+        return 0.0 if action == "block" else multiplier
 
     # ── попытка открыть позицию по тактике ───────────────────────────
 
@@ -263,6 +336,10 @@ class AITacticStrategy:
         news = state.get_news(ticker) if hasattr(state, "get_news") else None
 
         if direction == 0 or conviction < self.cfg.min_conviction:
+            logger.info(
+                "AITacticStrategy: SKIP %s — conviction=%.3f < min=%.2f (dir=%+d)",
+                ticker, conviction, self.cfg.min_conviction, direction,
+            )
             self._log_decision(ticker=ticker, direction=direction, action="skipped",
                                skip_reason="bias_flat_or_low_conviction", news=news,
                                regime_info=regime_info)
@@ -311,9 +388,14 @@ class AITacticStrategy:
 
         # ── дополнительный дэмпинг за риск-категорию (legal/reputational/etc) ──
         if news is not None:
-            effective_conviction *= self._risk_dampen_factor(news)
+            pass  # dampen перенесён в сайзинг
 
         if effective_conviction < self.cfg.min_conviction:
+            logger.info(
+                "AITacticStrategy: SKIP %s — effective_conviction=%.3f < min=%.2f (raw=%.3f, dampen=%.2f)",
+                ticker, effective_conviction, self.cfg.min_conviction, conviction,
+                self._risk_dampen_factor(news),
+            )
             self._log_decision(ticker=ticker, direction=direction, action="skipped",
                                skip_reason="conviction_floor", kronos_signal=kronos_signal,
                                news=news, regime_info=regime_info)
@@ -323,9 +405,77 @@ class AITacticStrategy:
         if regime_info is not None:
             direction_mult = signal_multiplier(regime_info.regime, direction, ticker=ticker)
 
-        qty = self.cfg.qty_per_trade * effective_conviction * direction_mult
+        price = float(state.prices[ticker])
+        equity = float(getattr(state, "portfolio_value", 0.0) or getattr(state, "equity", 0.0) or 0.0)
+        if equity <= 0:
+            equity = float(getattr(state, "cash", 0.0) or 1000.0)
+
+        if direction_mult <= 0:
+            logger.info("AITacticStrategy: SKIP %s — regime_mult %.2f <= 0 (режим против сделки)",
+                        ticker, direction_mult)
+            return None
+
+        # drawdown-мультипликатор: линейное снижение от 0% до 5% просадки, пол 0.25
+        dd_mult = 1.0
+        hist = getattr(state, "pnl_history", None)
+        if hist:
+            try:
+                peak = max(v for _, v in hist)
+                if peak > 0:
+                    dd = max(0.0, (peak - equity) / peak)
+                    dd_mult = max(0.25, min(1.0, 1.0 - dd / 0.05))
+            except (TypeError, ValueError):
+                pass
+
+        # портфельная экспозиция: остаток gross-лимита как кэп нотационала
+        gross = 0.0
+        for pos_t, pos in getattr(state, "positions", {}).items():
+            p_price = float(getattr(state, "prices", {}).get(pos_t, 0.0) or 0.0)
+            gross += abs(float(getattr(pos, "qty", 0.0) or 0.0) * p_price)
+        gross_remaining = max(0.0, equity * self.cfg.max_gross_frac - gross)
+
+        notional, _ = calculate_order_size(
+            equity=equity, entry=price,
+            stop=price * (1.0 - self.cfg.stop_distance_pct),
+            conviction=effective_conviction,
+            regime_mult=direction_mult,
+            base_risk_frac=self.cfg.base_risk_frac,
+            min_conviction=self.cfg.min_conviction,
+            full_conviction=self.cfg.full_conviction,
+            conviction_gamma=self.cfg.conviction_gamma,
+            drawdown_mult=dd_mult,
+            fee_pct=self.cfg.fee_pct,
+            slippage_pct=self.cfg.slippage_pct,
+            max_notional_frac=self.cfg.max_notional_frac,
+        )
+        # exchange-min bump: risk-budget-aware
+        exchange_min = BYBIT_LINEAR_MIN_NOTIONAL.get(ticker, 85.0)
+        if notional < exchange_min:
+            eff_loss = (self.cfg.stop_distance_pct
+                        + self.cfg.fee_pct
+                        + self.cfg.slippage_pct)
+            if exchange_min * eff_loss <= equity * self.cfg.base_risk_frac:
+                logger.info(
+                    "AITacticStrategy: BUMP %s notional %.2f -> %.2f",
+                    ticker, notional, exchange_min)
+                notional = exchange_min
+
+        dampen = self._risk_dampen_factor(news)
+        notional = min(notional * dampen, gross_remaining)
+
+        floor = max(self.cfg.min_notional, exchange_min)
+        if notional < floor:
+            logger.info(
+                "AITacticStrategy: SKIP %s — notional %.2f < floor %.2f",
+                ticker, notional, floor)
+            return None
+
+        qty = notional / price
+        logger.info("AITacticStrategy: SIZE %s notional=%.2f qty=%.6f dd_mult=%.2f gross_rem=%.2f",
+                    ticker, notional, qty, dd_mult, gross_remaining)
         side = OrderSide.BUY if direction > 0 else OrderSide.SELL
 
+        self._position_intent_at[ticker] = utcnow()
         self._positions[ticker] = TacticalPosition(
             ticker=ticker, direction=direction,
             entry_conviction=effective_conviction, horizon=horizon,
@@ -366,13 +516,20 @@ class AITacticStrategy:
         )]
 
     def _get_kronos_signal(self, ticker: str, state: MarketState) -> Optional[TradingSignal]:
+        if not hasattr(self, "_ksig_cache"):
+            self._ksig_cache = {}
+            self._ksig_ttl = 900.0  # прогноз Kronos максимум раз в 15 мин на тикер
+        now = time.monotonic()
+        cached = self._ksig_cache.get(ticker)
+        if cached is not None and now - cached[0] < self._ksig_ttl:
+            return cached[1]
         try:
             source = self._ohlcv.get(ticker)
             if source is None:
                 return None
             kstate = self._kronos.encode_prices(source, ticker=ticker)
             kf = extract_features(kstate, last_price=state.prices.get(ticker, 0.0))
-            return TradingSignal(
+            sig = TradingSignal(
                 ticker=ticker,
                 direction=kf.trend_direction,
                 strength=abs(kf.expected_return),
@@ -381,6 +538,8 @@ class AITacticStrategy:
                 source="kronos",
                 kronos_state=kstate,
             )
+            self._ksig_cache[ticker] = (now, sig)
+            return sig
         except Exception as exc:
             logger.debug("AITacticStrategy: Kronos signal for %s failed: %s", ticker, exc)
             return None
