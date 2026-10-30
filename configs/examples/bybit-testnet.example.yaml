@@ -1,0 +1,5 @@
+# Bybit Testnet only. Not a live-account key.
+bybit:
+  api_key: ""
+  api_secret: ""
+  category: spot

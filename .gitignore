@@ -32,3 +32,12 @@ finvex_for_cleanup_*.zip
 .DS_Store
 configs/llm_shared.yaml
 /configs/*.user.yaml
+/configs/llm_shared.yaml
+/configs/bybit_testnet_key.yaml
+/configs/sandbox_key.yaml
+/configs/bybit_mainnet_key.yaml
+/configs/prod_key.yaml
+/configs/deepseek_news.yaml
+/configs/providers.local.yaml
+/.env
+/.venv/
