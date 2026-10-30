@@ -1,0 +1,9 @@
+# Шлюз контроля ИИ-агентов.
+data_dir: data/gateway        # agents.json, rules.json, ledger.jsonl
+host: 127.0.0.1               # наружу не открываем
+port: 8765
+portfolio:                    # бумажный портфель для проверки лимитов; заменяется адаптером брокера
+  cash: 1000000
+  positions: {}
+execution:
+  enabled: false              # без true заявки не уходят брокеру ни в одном режиме

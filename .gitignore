@@ -1,16 +1,34 @@
+# секреты
 **/*key*.yaml
 **/*secret*.yaml
-**/deepseek_news.yaml
+configs/llm_shared.yaml
+configs/deepseek_news.yaml
 .env
-Kronos/
-**/data/
-**/logs/
+# внешние репозитории и данные
+third_party/Kronos/
+/Kronos/
+/data/
+/reports/
+/logs/
+research/results/
 *.log
 *.db
 *.sqlite
-_test_project/analysis/results/
+# python
 .venv/
 venv/
 __pycache__/
 *.pyc
-_test_project/configs/llm_shared.yaml
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+# архивы упаковки
+finvex_for_cleanup_*.zip
+.ruff_cache/
+.mypy_cache/
+*.bak
+*.tmp
+.DS_Store
+configs/llm_shared.yaml
+/configs/*.user.yaml

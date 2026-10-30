@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finvex"
+version = "0.2.0"
+description = "Аналитическая система для банков и брокеров: рыночные данные, прогноз Kronos, новостной риск, контур ограничений"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy", "pandas", "httpx", "PyYAML", "openai", "feedparser", "requests",
+]
+
+[project.optional-dependencies]
+ml = ["torch", "transformers", "sentence-transformers", "einops", "huggingface_hub", "safetensors", "scikit-learn", "scipy", "statsmodels"]
+crypto = ["pybit"]
+tinkoff = ["t-tech-investments"]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.entry-points."finvex.providers"]
+
+[tool.setuptools.packages.find]
+include = ["finvex*"]

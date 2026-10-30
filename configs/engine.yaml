@@ -1,0 +1,49 @@
+# ────────────────────────────────────────────────────
+# Engine Configuration
+# ────────────────────────────────────────────────────
+
+mode: backtest          # backtest | sandbox | live
+broker: bybit
+commission: 0.0005      # 0.05%
+currency: RUB
+timeframe: 1d           # 1m | 5m | 1h | 1d
+start_date: "2023-01-01"
+end_date:   "2024-01-01"
+initial_capital: 1_000_000
+
+# ── Активы/Universe ───────────────────────────────────
+# Фиксированный статический список тикеров заменён динамическим UniverseSelector
+# (finvex/decision/universe.py) — тикеры подбираются автоматически из
+# ликвидного пула Tinkoff + новостной активности + тактики LLM-стратега.
+# Формальное поле tickers ниже используется только в backtest-режиме
+# (где нужен стабильный набор для воспроизводимости) — в live оно игнорируется.
+tickers:
+  - SBER
+  - GAZP
+  - LKOH
+  - YNDX
+  - GMKN
+
+# ── UniverseSelector (live-режим) ─────────────────────
+universe:
+  max_universe_size: 40          # сколько тикеров одновременно отслеживать
+  min_lot_price_rub: 50.0        # минимальная цена лота — отсекает микрокапы с высоким спредом
+  require_short_enabled: false   # true = только бумаги с доступным шортом (важно для pairs)
+  refresh_interval_sec: 3600     # пересчёт базового universe каждый час
+  news_boost_weight: 0.3         # вес новостной активности в ранжировании (0=игнор, 1=только новости)
+  # тикеры, которые никогда не брать, независимо от тактики стратега
+  hard_exclude: []
+  # fallback, если Tinkoff API недоступен при старте
+  fallback_tickers: ["BTCUSDT", "ETHUSDT"]
+
+
+# ── Инструмент (динамический фильтр TinkoffClient) ────
+instrument:
+  type: share           # share | etf | futures | bond
+  currency: rub         # rub | usd | null (без фильтра)
+
+# ── Сигнальный слой (AITacticStrategy) ────────────────
+tactic:
+  min_conviction: 0.35
+  qty_per_trade: 0.005   # qty = qty_per_trade x conviction; BTC-ордер ~$150-300 при equity $1010
+  max_positions: 10
