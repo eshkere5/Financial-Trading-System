@@ -1,0 +1,27 @@
+# Профили источников данных и исполнения.
+# Новый провайдер подключается здесь без изменения кода ядра:
+#   type: moex_iss | csv_file | <имя из entry points finvex.providers> | "пакет.модуль:Класс"
+profile: bank_analytics
+
+default_market_data: moex_shares
+
+market_data:
+  moex_shares:
+    type: moex_iss
+    params: {market: shares, board: TQBR}
+  moex_index:
+    type: moex_iss
+    params: {market: index, board: SNDX}
+  # Публичные данные Bybit, ключ не нужен (из РФ нужен VPN). Крипто-тикеры (BTCUSDT и т.п.) идут сюда автоматически.
+  bybit_spot:
+    type: bybit_public
+    params: {category: spot}
+  local_csv:
+    type: csv_file
+    param: {directory: data/candles, venue: MOEX}
+
+# Исполнение выключено. Даже если указать type, без enabled: true
+# будет использован disabled. Брокерские адаптеры (ВТБ и др.) подключаются сюда же.
+execution:
+  type: disabled
+  enabled: false

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="finvex-token" content="__TOKEN__">
+<title>Finvex: контроль ИИ-агентов</title>
+<link rel="preload" href="/fonts/onest-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-view="verdicts">
+<a class="skip" href="#content">К содержимому</a>
+
+<nav class="rail" aria-label="Разделы">
+  <div class="logo" aria-hidden="true">F</div>
+  <button class="nav" data-view="verdicts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Вердикты</span></button>
+  <button class="nav" data-view="chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg><span>Чат</span></button>
+  <button class="nav" data-view="rules"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v16M12 4v16M19 4v16M3 9h4M10 15h4M17 8h4"/></svg><span>Правила</span></button>
+  <button class="nav" data-view="agents"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-4 3-6 7-6s7 2 7 6"/></svg><span>Агенты</span></button>
+  <button class="nav" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg><span>Настройки</span></button>
+  <button class="nav" data-view="sandbox"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M8 15h8"/></svg><span>Песочница</span></button>
+  <button class="nav" data-view="modules"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg><span>Модули</span></button>
+</nav>
+
+<main class="main" id="content" tabindex="-1">
+  <header class="top">
+    <h1 id="title">Вердикты</h1>
+    <dl class="top-meta" id="top-meta"></dl>
+    <button class="btn ghost" id="btn-panel" type="button">Актив и проверка</button>
+  </header>
+
+  <section class="view" id="v-verdicts" aria-labelledby="title">
+    <div class="summary" id="summary" aria-live="polite"></div>
+    <div class="stopped" id="stopped" hidden></div>
+    <div class="filters" id="filters" role="group" aria-label="Фильтры"></div>
+    <div class="table-wrap">
+      <table class="tbl" id="vt">
+        <caption class="sr">Вердикты шлюза по намерениям агентов. Строка открывает проверки.</caption>
+        <thead><tr><th scope="col">Время</th><th scope="col">Агент</th><th scope="col">Действие</th><th scope="col">Решение</th><th scope="col" class="c-why">Причина</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty" id="v-empty" hidden>
+      <p>Намерений пока нет.</p>
+      <p class="mu">Подключите агента на вкладке «Агенты» или проверьте действие вручную в панели справа.</p>
+    </div>
+  </section>
+
+  <section class="view" id="v-settings" aria-labelledby="title">
+    <p class="lead">Аналитика и чат работают через модель, ключ к которой задаёте вы. Ключ хранится только на этом компьютере и в браузер не возвращается.</p>
+    <form class="card form" id="llm-form" autocomplete="off">
+      <h2>Ключ для аналитики</h2>
+      <p class="mu" id="llm-state" aria-live="polite"></p>
+      <label>Модель<input id="llm-model" name="model" maxlength="80" placeholder="deepseek-v4-flash" required></label>
+      <label>Адрес API<input id="llm-url" name="base_url" inputmode="url" placeholder="https://api.deepseek.com" required></label>
+      <label>API-ключ<input id="llm-key" name="api_key" type="password" placeholder="Вставьте новый ключ или оставьте пустым" autocomplete="new-password" spellcheck="false"></label>
+      <div class="actions">
+        <button class="btn solid" type="submit">Сохранить</button>
+        <button class="btn ghost" type="button" id="llm-check">Проверить ключ</button>
+        <button class="btn ghost" type="button" id="llm-clear">Удалить ключ</button>
+        <span class="hint" id="llm-msg" role="status" aria-live="polite"></span>
+      </div>
+      <p class="hint">Переменная окружения DEEPSEEK_API_KEY приоритетнее ключа из формы. Файл настроек configs/llm_shared.yaml исключён из Git.</p>
+    </form>
+    <div class="card form" id="adapters" data-requires="data">
+      <h2>Источники данных</h2>
+      <p class="mu" id="ad-note"></p>
+      <div class="table-wrap"><table class="tbl" id="ad-table"><thead><tr><th scope="col">Имя</th><th scope="col">Тип</th><th scope="col">Откуда</th><th scope="col" class="r">Действия</th></tr></thead><tbody></tbody></table></div>
+      <form id="ad-form" class="row2" autocomplete="off">
+        <label>Имя<input name="name" placeholder="bybit_linear" maxlength="31" required></label>
+        <label>Тип<select name="type" id="ad-type"></select></label>
+        <label style="grid-column:1/-1">Параметры (JSON)<input name="params" value="{}" spellcheck="false"></label>
+        <div class="actions" style="grid-column:1/-1;margin:0"><button class="btn solid" type="submit">Добавить источник</button><span class="hint" id="ad-msg" role="status" aria-live="polite"></span></div>
+      </form>
+    </div>
+  </section>
+
+  <section class="view" id="v-modules" aria-labelledby="title">
+    <div class="vhead"><div><h2>Состав платформы</h2><p class="sub">Включение модуля открывает связанные разделы и маршруты API, выключение закрывает их. Защитный слой при выключении отклоняет заявки.</p></div></div>
+    <div class="mod-grid" id="mod-grid"></div>
+    <p class="hint" id="mod-msg" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="view" id="v-locked" aria-labelledby="title"></section>
+
+  <section class="view" id="v-sandbox" aria-labelledby="title">
+    <p class="lead">Подключите ваш ключ LLM к тестовому агенту и посмотрите, что он решит и как это оценит шлюз. Заявки никуда не уходят: агенты песочницы всегда в режиме проверки.</p>
+    <form class="card form" id="sbx-form" autocomplete="off">
+      <div class="row2">
+        <label>Агент<select id="sbx-preset" name="preset"></select></label>
+        <label>Тикер<input id="sbx-symbol" name="symbol" value="BTCUSDT" maxlength="24" spellcheck="false"></label>
+      </div>
+      <label id="sbx-prompt-wrap" hidden>Промпт своего агента<textarea id="sbx-prompt" name="prompt" rows="4" maxlength="2000" placeholder="Например: торгуешь только откаты в сильном тренде, риск не больше 1%"></textarea></label>
+      <label>Пожелание (необязательно)<input id="sbx-note" name="note" maxlength="500" placeholder="Например: сосредоточься на новостном фоне"></label>
+      <div class="actions"><button class="btn solid" type="submit" id="sbx-run">Запустить агента</button><span class="hint" id="sbx-msg" role="status" aria-live="polite"></span></div>
+    </form>
+    <div id="sbx-out" aria-live="polite"></div>
+  </section>
+
+  <section class="view" id="v-chat" aria-label="Чат с аналитическим агентом">
+    <div class="chat-bar"><label for="chat-agent">Чат с</label><select id="chat-agent"><option value="">Общий (рынок в целом)</option></select></div>
+    <div class="msgs" id="msgs" role="log" aria-live="polite"></div>
+    <p class="note-box" id="chat-note" hidden></p>
+    <form class="composer" id="composer">
+      <label class="sr" for="q">Запрос</label>
+      <textarea id="q" rows="1" placeholder="Например: полный анализ SBER за неделю"></textarea>
+      <button class="btn solid" type="submit" id="send">Отправить</button>
+    </form>
+  </section>
+
+  <section class="view" id="v-rules" aria-labelledby="title">
+    <p class="lead">Правила выполняет код шлюза. Агент не может ни изменить их, ни обойти.</p>
+    <div id="rules"></div>
+    <div class="actions"><button class="btn solid" id="save-rules" type="button">Сохранить правила</button><span class="hint" id="rules-msg" role="status"></span></div>
+  </section>
+
+  <section class="view" id="v-agents" aria-labelledby="title">
+    <p class="lead">У каждого агента свой ключ и свой набор данных. Токен брокера остаётся только у шлюза.</p>
+    <details class="add" id="add-box">
+      <summary class="btn solid">Подключить агента</summary>
+      <form class="add-form" id="add-form">
+        <label>Имя<input name="name" type="text" maxlength="60" required placeholder="например, аналитик-бот" autocomplete="off"></label>
+        <label>Режим<select name="mode"><option value="shadow">Только проверка (рекомендуется)</option><option value="enforce">Проверка и передача брокеру</option></select></label>
+        <label>Контекст<select name="context_profile"><option value="standard">Стандартный</option><option value="minimal">Минимальный: цена и режим</option><option value="full">Полный: с портфелем</option></select></label>
+        <button class="btn solid" type="submit">Создать и показать ключ</button>
+      </form>
+    </details>
+    <div class="table-wrap">
+      <table class="tbl" id="at">
+        <caption class="sr">Подключённые агенты</caption>
+        <thead><tr><th scope="col">Агент</th><th scope="col">Режим</th><th scope="col">Контекст</th><th scope="col" class="r">Вердиктов</th><th scope="col">Статус</th><th scope="col"><span class="sr">Действия</span></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="empty" id="a-empty" hidden>Агентов нет. Создайте первого и передайте ему ключ.</p>
+  </section>
+</main>
+
+<aside class="panel" id="panel" aria-label="Актив и ручная проверка">
+  <div class="p-head">
+    <label class="sr" for="sym">Тикер</label>
+    <input id="sym" class="sym" value="BTCUSDT" maxlength="24" spellcheck="false" autocomplete="off">
+    <button class="btn ghost close-p" id="close-panel" type="button">Закрыть</button>
+  </div>
+  <div class="px"><span class="px-v" id="px">-</span><span class="px-c" id="px-c"></span></div>
+  <div class="ranges" id="ranges" role="group" aria-label="Период"></div>
+  <div class="chart" id="chart"></div>
+  <dl class="kv" id="kv"></dl>
+  <p class="note" id="synthetic" hidden>Демо: данные синтетические, это не котировки.</p>
+
+  <div data-requires="guard">
+  <h2 class="sec">Контекст для агента</h2>
+  <dl class="kv" id="ctx"></dl>
+  </div>
+
+  <div data-requires="guard">
+  <h2 class="sec">Проверить намерение</h2>
+  <form id="intent" class="intent" autocomplete="off">
+    <div class="seg" role="radiogroup" aria-label="Сторона">
+      <label><input type="radio" name="side" value="buy" checked><span>Покупка</span></label>
+      <label><input type="radio" name="side" value="sell"><span>Продажа</span></label>
+    </div>
+    <div class="row2">
+      <label>Количество<input name="quantity" inputmode="decimal" value="10"></label>
+      <label>Тип<select name="order_type"><option value="market">Рыночная</option><option value="limit">Лимитная</option></select></label>
+    </div>
+    <div class="row2">
+      <label>Лимитная цена<input name="limit_price" inputmode="decimal" disabled></label>
+      <label>Уверенность, 0..1<input name="confidence" inputmode="decimal" value="0.7"></label>
+    </div>
+    <label>Обоснование<textarea name="rationale" rows="2">Импульс выше SMA50, риск ограничен стопом</textarea></label>
+    <button class="btn solid" type="submit">Проверить без исполнения</button>
+  </form>
+  <div class="result" id="result" hidden aria-live="polite"></div>
+  </div>
+</aside>
+
+<dialog class="drawer" id="drawer" aria-labelledby="dr-title"></dialog>
+<dialog class="keydlg" id="keydlg" aria-labelledby="kd-title"></dialog>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,155 +1,233 @@
-Financial Trading System — Kronos + Regime Layer + News Risk Pipeline
-Исследовательская торговая система: foundation-модель временных рядов Kronos,
-детектор рыночного режима с послережимным сайзингом, событийный новостной
-риск-контур (RSS → e5-фильтр → LLM) и полный журнал решений.
-Рынки: акции MOEX (Tinkoff) и крипта (Bybit). Курсовой проект / research sandbox.
+# Finvex
 
-Статус: pre-soak frozen state. Бэктесты v2 завершены (режимный слой
-измерен на двух рынках), следующий шаг — 21-дневный live soak-test
-на VM с журналом решений как источником истины.
+Аналитика финансового рынка, хаб ИИ-агентов и контроль решений до заявки.
 
-Архитектура
-text
-                        main.py CLI
-              backtest | live | news
-                 │              │
-        ┌────────▼─────┐  ┌─────▼──────────┐
-        │BacktestEngine│  │  LiveEngine    │  (async event loop, 60s tick)
-        └────────┬─────┘  └─────┬──────────┘
-                 └───────┬──────┘
-                         │
-            ┌────────────▼─────────────┐
-            │   AITacticStrategy       │  ← on_bar(state) → List[Order]
-            │                          │
-            │  1. Kronos forecast      │  KronosAdapter → direction + expected_return
-            │  2. Regime layer         │  RegimeDetector(OHLCV) → режим →
-            │     (site sizing)        │  regime_multiplier(режим, сторона) [0.2–1.4]
-            │  3. News risk dampener   │  effective_risk → factor 0.3–0.7 / block
-            └────────────┬─────────────┘
-                         │
-            ┌────────────▼─────────────┐
-            │   NewsRiskPipeline       │  (событийная модель)
-            │  RSS(30s) → e5-filter →  │  DeepSeek только на релевантное,
-            │  dedup → DeepSeek → TTL  │  cap 20 вызовов/цикл
-            └────────────┬─────────────┘
-                         │
-            ┌────────────▼─────────────┐
-            │      RiskManager         │  лимиты, stop/take, drawdown halt
-            ├──────────────────────────┤
-            │      TradeJournal        │  SQLite: КАЖДОЕ решение с контекстом
-            │  (opened/skipped/closed, │  (режим, множитель, риск, rationale)
-            │   outcomes T+1h/4h/24h)  │
-            └────────────┬─────────────┘
-                         │
-            ┌────────────▼─────────────┐
-            │     ExecutionRouter      │  Tinkoff (MOEX) / Bybit (testnet)
-            └──────────────────────────┘
-Ключевые компоненты
-Regime layer (src/regime/regime_detector.py)
-Офлайн-классификация бара в один из режимов (BULL_TREND, BEAR_TREND,
-HIGH_VOL_CHOP, RANGE_BOUND, RANGE_SQUEEZE, RALLY_FRENZY, RECOVERY, CRASH)
-по OHLCV-признакам. Измеренные в бэктесте множители сайзинга
-(режим × сторона × класс актива) применяются к размеру позиции:
-усиливаем плюсовые режимы (до ×1.4), душим минусовые (до ×0.2).
-Чистая функция, детерминированная, walk-forward совместимая.
+Платформа объединяет четыре модуля: адаптеры, аналитику, защитный слой и хаб агентов. Внешние агенты подключаются через HTTP API или MCP. Шлюз возвращает решение «разрешено», «доработать» или «отклонить» с причинами. Исполнение не следует включать для обычной демонстрации.
 
-TradeJournal (src/engine/trade_journal.py)
-SQLite-журнал всех решений (не только сделок): открытия, пропуски с причиной,
-закрытия, исходы T+1h/4h/24h. Включая сделки, которые режимный слой
-пропустил бы — для контрфактического what-if анализа.
+> Команды ниже выполняются в PowerShell из корня проекта, где находятся `pyproject.toml` и папка `finvex`.
 
-NewsRiskPipeline (src/news_agent_client/)
-rss_collector.py — непрерывный опрос фидов (Interfax, РБК, Finam,
-МосБиржа, крипто-фиды), poll ~30 сек;
+## 1. Установка на Windows
 
-keyword_filter.py — локальный e5-small фильтр релевантности, бесплатно;
+Требуется Python 3.10 или новее и Git. Для проекта рекомендуется отдельное виртуальное окружение. Не пересоздавайте существующее рабочее окружение без необходимости.
 
-news_risk_pipeline.py — дедупликация по item_id, TTL-память
-(short=3 дня, long=14 дней, линейное затухание), cap 20 LLM-вызовов/цикл;
+```powershell
+python --version
+python -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+& .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev,crypto]"
+```
 
-news_deep_dive.py — единственная точка вызова LLM (OpenAI-совместимый
-клиент, DeepSeek по умолчанию; base_url/model — из конфига).
-Строгий JSON: risk_category, severity, materiality, sentiment, horizon.
-Fail-closed: при ошибке API возвращает None, прежний риск сохраняется.
-Ключ читается из env DEEPSEEK_API_KEY.
+Для графиков и аналитических расчётов установите дополнительно:
 
-Стратегии
-src/signals/ai_tactic_strategy.py — основная: Kronos + режимный
-множитель + новостной демпфер;
+```powershell
+python -m pip install matplotlib scipy statsmodels scikit-learn
+```
 
-src/engine/kronos_default_strategy.py — базовая Kronos-стратегия
-(первичные watch_terms для новостного фильтра).
+Для расширенных ML-возможностей предусмотрена группа зависимостей `ml`. Она может потребовать значительного места и загрузки библиотек:
 
-Аналитика (analysis/)
-backtest_kronos.py, run_experiment.py — прогоны бэктестов;
+```powershell
+python -m pip install -e ".[ml]"
+```
 
-regime_report.py — распределение режимов, hit-rate и PnL по ячейкам;
+Для T-Invest Sandbox отдельно:
 
-whatif_regime.py — контрфактический анализ режимных множителей;
+```powershell
+python -m pip install -e ".[tinkoff]"
+```
 
-smoke_regime.py — офлайн-проверка связки (1 минута, обязательна
-перед любым запуском);
+Установка этих пакетов не включает торговлю и не создаёт API-ключи. Публичные свечи Bybit не требуют торгового ключа; тестовый адаптер исполнения требует ключ Testnet.
 
-journal_report.py — отчёт по журналу решений (после soak'а).
+## 2. Первый запуск без ключей
 
-Структура
-text
-_test_project/
-├── analysis/            # бэктесты, режимные отчёты, smoke-тесты
-├── configs/             # engine / kronos / news_agent / llm_* (без ключей!)
-│                        # ключи: *.key.yaml и llm_shared.yaml — локально, в .gitignore
-├── src/
-│   ├── engine/          # live_engine, backtest_engine, risk_manager,
-│   │                    # trade_journal, market_state, portfolio, orders
-│   ├── executors/       # tinkoff_client, bybit_client, routers, lot_utils
-│   ├── kronos_layer/    # kronos_adapter (KronosState), kronos_features
-│   ├── regime/          # regime_detector
-│   ├── news_agent_client/  # rss_collector, keyword_filter, news_risk_pipeline,
-│   │                     # news_deep_dive, ticker_intelligence, llm_backend
-│   ├── services/        # deepseek_news_analyzer, news_db_migration
-│   ├── signals/         # ai_tactic_strategy и базовые сигналы
-│   ├── llm_strategist/  # стратегический LLM-слой (posture/size)
-│   └── utils/
-└── tests/               # e2e и smoke тесты
+```powershell
+python -m finvex.web --demo --open
+```
 
-Kronos/                  # модель — отдельный репо, клонируется рядом:
-                         # git clone https://github.com/shiyu-coder/Kronos.git
-Установка и запуск
-bash
-# 1. Код + модель
-git clone <этот репо> && cd <репо>
-git clone https://github.com/shiyu-coder/Kronos.git
+Адрес: `http://127.0.0.1:8765/`. Остановка сервера - `Ctrl+C` в терминале.
 
-# 2. Окружение (CPU-сборка torch — отдельно, до requirements)
-cd _test_project
-python3 -m venv .venv && source .venv/bin/activate   # Win: .venv\Scripts\activate
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r ../requirements.txt
+Демо использует синтетические рыночные данные и не требует ключа биржи. Сам аналитический чат и вызовы LLM в песочнице всё равно требуют настроенного API. Слово «демо» не означает бесплатные или офлайн-вызовы внешней модели.
 
-# 3. Секреты (локально, не в git)
-#    configs/*key*.yaml, configs/llm_shared.yaml
-#    .env: DEEPSEEK_API_KEY=sk-...
+Консольный сценарий шлюза:
 
-# 4. Предстартовая проверка (офлайн, обязательна)
-python analysis/smoke_regime.py
+```powershell
+python -m finvex.gateway demo
+```
 
-# 5. Запуск
-python src/main.py live --mode sandbox          # soak / sandbox
-python src/main.py backtest --config configs/engine.yaml
-pytest tests/ -v
-Запуск под tmux на VM — лог переживает разрыв SSH:
-tmux new -s soak → запуск → Ctrl+B, D.
+Не путайте демонстрационные намерения с результатами реальной торговли.
 
-Методология (важнее кода)
-Все изменения слоёв сначала измеряются на замороженных бэктестах
-(v2: 245 сделок крипта, 127 акции), потом попадают в прод;
+## 3. Почему локальных конфигов нет после клонирования
 
-Магнитудам прогноза Kronos не доверяем (не откалиброваны) —
-используем направление и hit-rate; ожидаемые доходности для
-cost-гейта берём из измеренного EV ячеек журнала;
+`.gitignore` не удаляет файлы. Он исключает локальные настройки, секреты и рабочие данные из обычного добавления в Git. Поэтому после клонирования нужные локальные конфиги создаются самостоятельно.
 
-Live soak-test 21 день на testnet: журнал решений — единственный
-источник истины для out-of-sample оценки;
+В репозитории есть безопасные шаблоны в `configs/examples/`. Они не содержат действующих ключей.
 
-Одна переменная за эксперимент: смена риск-LLM, порогов и слоёв
-— только между soak'ами, никогда посередине.
+Для подготовки локальных файлов:
+
+```powershell
+& .\scripts\setup-local.ps1
+```
+
+Если политика PowerShell блокирует скрипт:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+& .\scripts\setup-local.ps1
+```
+
+Скрипт не перезаписывает существующие настройки, не обращается к брокерам и не включает исполнение. Он добавляет необходимые локальные исключения в `.gitignore`.
+
+| Файл | Назначение | Когда нужен |
+|---|---|---|
+| `configs/llm_shared.yaml` | Общая конфигурация LLM: provider, base_url, model, api_key | Чат, LLM-песочница и соответствующие потребители аналитики |
+| `configs/bybit_testnet_key.yaml` | Ключ и секрет именно Bybit Testnet | Тестовое исполнение Bybit |
+| `configs/sandbox_key.yaml` | Токен T-Invest Sandbox | Тестовое исполнение T-Invest |
+| `configs/engine.user.yaml` | Локальная копия настроек движка | Дополнительные пользовательские сценарии; используется только тем запуском, который явно её читает |
+| `configs/llm_strategist.user.yaml` | Локальная копия параметров стратега | Дополнительные пользовательские сценарии; использование зависит от выбранного загрузчика |
+| `configs/providers.local.yaml` | Источники, добавленные через интерфейс | Создаётся интерфейсом при сохранении источников |
+
+Публичные конфиги `engine.yaml`, `gateway.yaml`, `providers.yaml`, `news_agent.yaml`, `llm_strategist.yaml` остаются в Git. Не вставляйте секреты в эти файлы.
+
+## 4. Настройка LLM
+
+Вариант A: запустите интерфейс, откройте «Настройки», задайте адрес API, модель и ключ. Интерфейс сохраняет настройки в `configs/llm_shared.yaml`.
+
+Вариант B: после подготовки конфигов отредактируйте файл локально:
+
+```powershell
+notepad .\configs\llm_shared.yaml
+```
+
+Пример структуры для OpenAI:
+
+```yaml
+provider: openai
+base_url: https://api.openai.com/v1
+model: YOUR_MODEL_ID
+api_key: ""
+```
+
+Замените `YOUR_MODEL_ID` точным идентификатором модели, доступной вашему аккаунту, и заполните ключ локально. Для другого OpenAI-совместимого сервиса укажите его адрес и модель. Совместимость модели с JSON-ответами, инструментами и параметрами необходимо проверять отдельно.
+
+Важные особенности текущего кода:
+
+- `DEEPSEEK_API_KEY` имеет приоритет над `api_key` в общем YAML даже при другом `provider`. Это историческое имя переменной, не рекомендация использовать только одного поставщика.
+- Если вы используете ключ из файла и ранее задали переменную, удалите её из текущего процесса:
+
+```powershell
+Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
+```
+
+- Одной `OPENAI_API_KEY` недостаточно для всех потребителей общего конфига: надёжнее настроить `llm_shared.yaml`.
+- Веб-настройки позволяют менять URL и модель, но поле `provider` в YAML следует проверить вручную: в некоторых подсистемах по нему выбирается endpoint.
+- Проверка ключа обращается к `/models`; конкретный провайдер может не поддерживать этот маршрут. Это не заменяет проверку выбранной модели в рабочем запросе.
+- Ключ не возвращается в браузер полностью, но локальный файл содержит его открытым текстом. Ограничьте доступ к компьютеру и файлу. На Windows файловые права требуют отдельной настройки.
+
+## 5. Рыночные данные и источники
+
+```powershell
+python -m finvex.web --open
+```
+
+Этот запуск использует настроенные источники вместо синтетических данных. Нужен доступ к их API. Использование реальных котировок само по себе не включает отправку торговых заявок.
+
+Источники задаются в `configs/providers.yaml`; локальные дополнения интерфейса сохраняются в `configs/providers.local.yaml`. После изменения источников может потребоваться перезапуск сервера.
+
+Не считайте пользовательские `.user.yaml` автоматически активными: стандартный путь движка - `configs/engine.yaml`, а веб-шлюз использует свою конфигурацию. Проверяйте параметры конкретной команды.
+
+## 6. Ключи тестовых площадок
+
+Наличие файла с пустыми ключами не означает готовность тестового контура.
+
+### Bybit Testnet
+
+```powershell
+notepad .\configs\bybit_testnet_key.yaml
+```
+
+```yaml
+bybit:
+  api_key: ""
+  api_secret: ""
+  category: spot
+```
+
+Используйте ключи именно Testnet, не основного счёта и не другого демо-режима. Эти поля предназначены для тестового адаптера. Секреты не публикуются.
+
+### T-Invest Sandbox
+
+```powershell
+notepad .\configs\sandbox_key.yaml
+```
+
+```yaml
+tinkoff:
+  token: ""
+```
+
+Заполните токен песочницы; текущий загрузчик ожидает строку, начинающуюся с `t.`.
+
+Для обычной демонстрации не создавайте боевые ключи и не меняйте конфигурацию исполнения. Этот README не запускает торговые тесты с отправкой заявок. Внешние вызовы модели могут быть платными даже в режиме shadow.
+
+## 7. Модули и журнал
+
+Раздел «Модули» управляет доступом к связанным функциям и API. Защитный слой зависит от адаптеров, хаб - от защиты; аналитика может быть отключена отдельно. Выключенная защита не должна превращаться в обход проверок.
+
+В опубликованной сборке присутствует журнал вердиктов `finvex/gateway/ledger.py`. Отдельный аудит `audit.py` не предполагается установленным автоматически: наличие и возможности журнала проверяйте по исходникам своей сборки. Не переносите результаты тестов другой сборки в описание текущей.
+
+Данные, состояние агентов и журналы в корневой `data/` локальные и не публикуются. Демо может использовать временное состояние.
+
+## 8. Подключение внешнего агента
+
+Создайте агента в интерфейсе или командой:
+
+```powershell
+python -m finvex.gateway agent-add my-bot
+```
+
+HTTP-маршруты: `/gateway/v1/context`, `/gateway/v1/limits`, `/gateway/v1/propose`, `/gateway/v1/verdicts/<id>`. Используется заголовок `Authorization: Bearer <ключ агента>`.
+
+MCP:
+
+```powershell
+python -m finvex.gateway.mcp --url http://127.0.0.1:8765 --key <AGENT_KEY>
+```
+
+Замените `<AGENT_KEY>` локально. Не вставляйте рабочие ключи в скриншоты, общедоступную историю команд или README. Ключ агента и ключ LLM - разные секреты.
+
+Для внешних агентов сначала используйте режим `shadow`. Не обещайте, что `propose` никогда не исполняет заявку: поведение зависит от режима агента и подключения исполнения.
+
+## 9. Проверки после установки
+
+Проверка синтаксиса без вызова брокера:
+
+```powershell
+python -m compileall -q finvex
+```
+
+Ограниченный набор локальных проверок:
+
+```powershell
+python -m pytest tests/test_modules.py tests/test_settings.py tests/test_gateway.py -q
+```
+
+Полный набор требует отдельного изучения зависимостей и тестов: некоторые проверки используют реальные источники, тестовые площадки или файлы `research/results/`, которые не публикуются по умолчанию. Перед полным прогоном смотрите конфигурацию и фикстуры; не включайте отправку заявок ради демонстрации.
+
+TSFM - необязательный для демонстрации расширенный контур. Его веса, внешний исходный код и вычисления не устанавливаются автоматически обычной командой `pip install -e .`. Отсутствующий прогноз или mock-режим не следует выдавать за работу реальной модели.
+
+## 10. Что публиковать в Git
+
+Публикуются исходники, безопасные конфиги, тесты, документация и шаблоны `configs/examples/`.
+
+Не публикуются: `.env`, ключи, `llm_shared.yaml`, `*.user.yaml`, `providers.local.yaml`, `.venv/`, корневые `data/`, `reports/`, `logs/`, рабочие базы и приватные артефакты.
+
+Корневые исключения должны иметь ведущий `/`: `/data/`, `/reports/`, `/logs/`. Слишком широкое `data/` может скрыть исходный пакет `finvex/data/`. Внутренние адаптеры TSFM также не должны попадать под правило для внешнего репозитория модели.
+
+Проверка:
+
+```powershell
+git check-ignore -v -- configs/llm_shared.yaml configs/bybit_testnet_key.yaml configs/sandbox_key.yaml configs/engine.user.yaml configs/providers.local.yaml
+```
+
+Если какой-то секрет уже отслеживается Git, добавления `.gitignore` недостаточно. Остановите публикацию, уберите файл из индекса и при раскрытии замените ключ. Не применяйте `git add -f` к секретам.

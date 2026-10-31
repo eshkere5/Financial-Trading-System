@@ -1,0 +1,11 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install numpy pandas httpx PyYAML openai feedparser requests pybit pytest pytest-asyncio
+      - run: pytest tests -q --ignore=tests/test_e2e_news_real.py --ignore=tests/test_e2e_trading_real.py
