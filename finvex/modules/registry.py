@@ -17,7 +17,7 @@ MODULES = [
     {"id": "data", "title": "Адаптеры данных и исполнения", "version": "1.0",
      "summary": "Источники котировок и адаптер исполнения. Исполнение включается отдельно в конфигурации.",
      "requires": [], "optional": [],
-     "api": ["GET /api/adapters", "PUT /api/adapters", "POST /api/adapters/check"], "ui": ["Источники данных в «Настройках»"]},
+     "api": ["GET /api/adapters", "PUT /api/adapters", "POST /api/adapters/check"], "ui": ["Данные рынка для проверок: источники задаются в configs/providers.yaml"]},
     {"id": "analytics", "title": "Аналитика", "version": "1.0",
      "summary": "Новостной фон и прогноз Kronos как входные данные для правил. Без модуля правила аналитики пропускаются.",
      "requires": [], "optional": ["data"],

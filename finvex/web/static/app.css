@@ -394,3 +394,9 @@ body[data-locked="1"]{grid-template-columns:var(--rail) minmax(0,1fr)}
   .rail .nav{flex:0 0 68px;min-width:68px}
   .nav.locked::after{right:8px}
 }
+
+/* подключение агентов и песочница */
+.kind-tag{font-size:var(--fs-xs);color:var(--mu);border:1px solid var(--line2);border-radius:5px;padding:0 6px}
+.tbl td .btn+.btn{margin-left:var(--sp2)}
+.run-res{display:grid;gap:var(--sp2);margin:var(--sp3) 0}
+.run-res div{border:1px solid var(--line2);border-radius:var(--r);padding:var(--sp2) var(--sp3)}

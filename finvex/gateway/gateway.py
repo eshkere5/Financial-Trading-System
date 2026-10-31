@@ -48,8 +48,24 @@ class Gateway:
         self._verdicts: "list[dict]" = []
         self._by_id: dict = {}
         self._by_client: dict = {}
+        self._reindex()
+
+    def _reindex(self) -> None:
+        self._verdicts, self._by_id, self._by_client = [], {}, {}
         for row in self.ledger.rows():
+            if row["data"].get("kind") == "purge":     # контрольная запись об удалении агента: это не вердикт
+                continue
             self._index({**row["data"], "ledger_hash": row["hash"]})
+
+    def delete_agent(self, agent_id: str) -> dict:
+        """Удаляет агента, его ключи и все его вердикты. В журнале остаётся одна контрольная запись без содержимого."""
+        with self._lock:
+            if self.agents.get(agent_id) is None:
+                raise GatewayError("not_found", "агент не найден", 404)
+            removed = self.ledger.purge_agent(agent_id, now_iso(self.clock()))
+            self.agents.delete(agent_id)
+            self._reindex()
+            return {"deleted": agent_id, "removed_verdicts": removed}
 
     def _index(self, v: dict) -> None:
         self._verdicts.append(v)
@@ -66,6 +82,7 @@ class Gateway:
         ag = self.agents.authenticate(key)
         if ag is None:
             raise GatewayError("unauthorized", "неверный или отозванный ключ агента", 401)
+        self.agents.touch(ag.id, now_iso(self.clock()))
         return ag
 
     def _agent_rules(self, ag: Agent) -> dict:

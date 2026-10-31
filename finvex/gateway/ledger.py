@@ -43,6 +43,27 @@ class Ledger:
             self._last = digest
             return digest
 
+    def purge_agent(self, agent_id: str, ts: str) -> int:
+        """Убирает записи агента и пересобирает цепочку. В конец добавляется контрольная запись:
+        сколько записей удалено и какой была вершина цепочки до удаления. Содержимое удалённых записей не сохраняется."""
+        with self._lock:
+            keep = [r["data"] for r in self._rows if r["data"].get("agent_id") != agent_id or r["data"].get("kind") == "purge"]
+            removed = len(self._rows) - len(keep)
+            if not removed:
+                return 0
+            rows, last = [], GENESIS
+            for data in keep + [{"kind": "purge", "removed": removed, "previous_head": self._last, "ts": ts}]:
+                body = {"seq": len(rows) + 1, "prev": last, "data": data}
+                digest = hashlib.sha256((last + _canon(body)).encode("utf-8")).hexdigest()
+                rows.append({**body, "hash": digest})
+                last = digest
+            if self.path:
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text("".join(_canon(r) + "\n" for r in rows), encoding="utf-8")
+                tmp.replace(self.path)
+            self._rows, self._last = rows, last
+            return removed
+
     def verify(self) -> dict:
         prev = GENESIS
         for row in self._rows:

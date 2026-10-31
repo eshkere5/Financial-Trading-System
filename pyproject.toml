@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tsfm = ["torch>=2.0", "einops==0.8.1", "huggingface_hub>=0.33.1,<2", "safetensors>=0.6.2", "tqdm>=4.67.1", "matplotlib>=3.9,<4"]
+litellm = ["litellm[proxy]"]
 ml = ["torch", "transformers", "sentence-transformers", "einops", "huggingface_hub", "safetensors", "scikit-learn", "scipy", "statsmodels"]
 crypto = ["pybit"]
 tinkoff = ["t-tech-investments"]

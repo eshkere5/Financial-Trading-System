@@ -38,8 +38,8 @@ def test_full_cycle_model_to_verdict_in_shadow():
 def test_sandbox_agent_is_forced_back_to_shadow():
     gw, sb, _ = box(GOOD)
     sb.run("trend", "SBER")
-    ag = next(a for a in gw.agents.list() if a.name.startswith("Песочница"))
-    gw.agents.update(ag.id, mode="enforce")
+    ag = next(a for a in sb.lab.agents.list() if a.name.startswith("Песочница"))
+    sb.lab.agents.update(ag.id, mode="enforce")
     assert sb.run("trend", "SBER")["verdict"]["mode"] == "shadow"
 
 

@@ -108,6 +108,6 @@ def test_ui_markup_declares_module_dependencies():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert 'data-view="modules"' in html and 'id="v-locked"' in html
-    assert len(re.findall(r'data-requires="(guard|data)"', html)) == 3
+    assert len(re.findall(r'data-requires="(guard|data)"', html)) == 2
     for view, mod in {"verdicts": "guard", "rules": "guard", "agents": "guard", "chat": "hub", "sandbox": "hub"}.items():
         assert f'{view}: "{mod}"' in js

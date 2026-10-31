@@ -1,0 +1,12 @@
+# LiteLLM template for Finvex (ASCII only on purpose: Windows may read this file in a legacy encoding).
+# The script copies it to deploy/litellm/litellm_config.yaml (not tracked by Git).
+# Keys are not written here: os.environ/NAME reads the value from .env.litellm.
+model_list:
+  - model_name: finvex-main                  # this is the model name you type into Finvex
+    litellm_params:
+      model: openai/YOUR_MODEL_ID            # openai/<model> for OpenAI-compatible services; use the exact model id from your provider
+      api_base: https://api.example.com/v1   # provider API address
+      api_key: os.environ/PROVIDER_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY  # the only key Finvex knows; created by the script

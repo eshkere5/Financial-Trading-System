@@ -67,7 +67,7 @@ function setView(v) {
   if (v === "rules") loadRules();
   if (v === "agents") loadAgents();
   if (v === "chat") initChat();
-  if (v === "settings") { loadSettings(); loadAdapters(); }
+  if (v === "settings") loadSettings();
   if (v === "sandbox") loadSandbox();
   if (v === "modules") loadModules();
 }
@@ -112,12 +112,27 @@ function renderStopped(r) {
 }
 
 /* настройки: ключ LLM */
+let LLM_PROVIDERS = [];
+function applyProvider(id, fresh) {
+  const p = LLM_PROVIDERS.find(x => x.id === id) || LLM_PROVIDERS[LLM_PROVIDERS.length - 1] || {};
+  $("#llm-note").textContent = p.note || "";
+  const custom = p.id === "custom";
+  $("#llm-url-wrap").hidden = !custom; $("#llm-key-wrap").hidden = p.needs_key === false;
+  if (fresh) { if (!custom) $("#llm-url").value = p.base_url; if (p.model_hint) $("#llm-model").value = p.model_hint; }
+  $("#llm-model").placeholder = p.model_hint || "название модели из кабинета провайдера";
+}
 const loadSettings = guard(async () => {
   const s = await api("/api/settings");
+  LLM_PROVIDERS = s.providers || [];
+  const sel = clear($("#llm-provider"));
+  LLM_PROVIDERS.forEach(p => sel.append(h("option", { value: p.id, selected: p.id === s.provider }, p.title)));
+  if (!LLM_PROVIDERS.some(p => p.id === s.provider)) sel.value = "custom";
+  sel.onchange = () => applyProvider(sel.value, true);
   $("#llm-model").value = s.model; $("#llm-url").value = s.base_url; $("#llm-key").value = "";
+  applyProvider(sel.value, false);
   const src = { env: "из переменной окружения DEEPSEEK_API_KEY", file: "из файла настроек", none: "" }[s.source];
-  $("#llm-state").textContent = s.has_key ? `Ключ задан (${s.key_hint}), ${src}.` : "Ключ не задан: чат и анализ рынка отвечать не смогут.";
-  $("#llm-clear").disabled = s.source !== "file";
+  $("#llm-state").textContent = s.needs_key === false ? "Локальная модель: ключ не нужен." : (s.has_key ? `Ключ задан (${s.key_hint}), ${src}.` : "Ключ не задан: чат и анализ рынка отвечать не смогут.");
+  $("#llm-clear").disabled = s.source !== "file" || s.needs_key === false;
 });
 function llmMsg(text, bad) { const m = $("#llm-msg"); m.textContent = text; m.classList.toggle("bad", !!bad); }
 $("#llm-form").addEventListener("submit", async e => {
@@ -131,57 +146,63 @@ $("#llm-check").addEventListener("click", async () => {
 });
 $("#llm-clear").addEventListener("click", async () => {
   if (!confirm("Удалить сохранённый ключ? Чат и анализ перестанут отвечать.")) return;
-  try { await api("/api/settings", { method: "PUT", body: { base_url: $("#llm-url").value, model: $("#llm-model").value, clear: true } }); llmMsg("Ключ удалён"); await loadSettings(); await loadState(); }
+  try { await api("/api/settings", { method: "PUT", body: { provider: $("#llm-provider").value, base_url: $("#llm-url").value, model: $("#llm-model").value, clear: true } }); llmMsg("Ключ удалён"); await loadSettings(); await loadState(); }
   catch (err) { llmMsg(err.message, true); }
 });
 
-/* источники данных */
-const loadAdapters = guard(async () => {
-  const a = await api("/api/adapters"), body = clear($("#ad-table tbody"));
-  $("#ad-note").textContent = `${a.note} Исполнение: ${a.execution.enabled ? "включено" : "выключено"}.${a.sdk.pybit ? "" : " Библиотека pybit не установлена: она нужна только для торговли Bybit, публичные данные работают без неё."}`;
-  a.market_data.forEach(r => body.append(h("tr", {}, h("td", {}, h("b", {}, r.name)), h("td", {}, r.type), h("td", { class: "mu" }, r.source),
-    h("td", { class: "r" }, h("button", { class: "btn ghost sm", type: "button", onclick: async e => {
-      e.target.disabled = true; e.target.textContent = "Проверяю…";
-      try { const c = await api("/api/adapters/check", { method: "POST", body: { name: r.name } }); $("#ad-msg").textContent = `${r.name}: ${c.message}`; $("#ad-msg").classList.toggle("bad", !c.ok); }
-      catch (err) { $("#ad-msg").textContent = err.message; $("#ad-msg").classList.add("bad"); }
-      e.target.disabled = false; e.target.textContent = "Проверить"; } }, "Проверить"),
-      r.removable ? h("button", { class: "btn ghost sm", type: "button", style: "margin-left:8px", onclick: guard(async () => { if (!confirm(`Удалить источник ${r.name}?`)) return; await api("/api/adapters", { method: "PUT", body: { remove: r.name } }); loadAdapters(); }) }, "Удалить") : null))));
-  const sel = clear($("#ad-type")); a.types.forEach(t => sel.append(h("option", { value: t.type }, t.desc ? `${t.type}: ${t.desc}` : t.type)));
-});
-$("#ad-form").addEventListener("submit", async e => {
-  e.preventDefault(); const f = new FormData(e.target); let params;
-  try { params = JSON.parse(f.get("params") || "{}"); } catch (_) { $("#ad-msg").textContent = "Параметры должны быть корректным JSON"; $("#ad-msg").classList.add("bad"); return; }
-  try { await api("/api/adapters", { method: "PUT", body: { name: f.get("name"), type: f.get("type"), params } }); $("#ad-msg").textContent = "Добавлено. Источник заработает после перезапуска."; $("#ad-msg").classList.remove("bad"); e.target.reset(); loadAdapters(); }
-  catch (err) { $("#ad-msg").textContent = err.message; $("#ad-msg").classList.add("bad"); }
-});
-
 /* песочница */
-let SBX = [];
+let SBX = { sources: [], agents: [] };
+function sbxSync() {
+  const src = $("#sbx-source").value, s = SBX.sources.find(x => x.id === src) || {};
+  $("#sbx-hint").textContent = s.hint || "";
+  const usesRole = ["model", "custom_api", "http"].includes(src);
+  $("#sbx-preset-wrap").hidden = !usesRole;
+  $("#sbx-prompt-wrap").hidden = !(usesRole && $("#sbx-preset").value === "custom");
+  $("#sbx-opt-custom").hidden = src !== "custom_api"; $("#sbx-opt-agent").hidden = src !== "agent"; $("#sbx-opt-http").hidden = src !== "http";
+}
 const loadSandbox = guard(async () => {
-  const r = await api("/api/sandbox/presets"); SBX = r.items;
+  const r = await api("/api/sandbox/presets"); SBX = r;
+  const src = clear($("#sbx-source")); r.sources.forEach(s => src.append(h("option", { value: s.id }, s.title)));
   const sel = clear($("#sbx-preset")); r.items.forEach(p => sel.append(h("option", { value: p.id }, p.name)));
-  const sync = () => { $("#sbx-prompt-wrap").hidden = sel.value !== "custom"; };
-  sel.onchange = sync; sync();
-  $("#sbx-msg").textContent = r.has_key ? "" : "Ключ LLM не задан: добавьте его во вкладке «Настройки».";
+  const ag = clear($("#sbx-agent")); r.agents.forEach(a => ag.append(h("option", { value: a.id }, `${a.name} (${a.kind === "llm" ? "нейросеть" : "по адресу"})`)));
+  if (!r.agents.length) ag.append(h("option", { value: "" }, "Подключённых агентов нет"));
+  src.onchange = sbxSync; sel.onchange = sbxSync; sbxSync();
+  $("#sbx-msg").textContent = r.has_key ? "" : "Ключ модели не задан: источники без модели (аналитик Finvex, агент по адресу) работают без него.";
 });
+function sbxVerdict(v) {
+  return [h("h3", { class: "sec" }, "Вердикт шлюза"), h("p", {}, decPill(v.decision), h("span", { class: "mu" }, `  ${v.execution_note}`)),
+    h("p", { class: "agent-msg" }, v.agent_message),
+    v.checks.filter(c => c.status !== "skip").map(c => h("div", { class: "chk " + c.status }, h("div", { class: "st" }, ST[c.status] || c.status), h("div", {}, h("div", { class: "t" }, c.name), h("div", { class: "m" }, c.message))))];
+}
 $("#sbx-form").addEventListener("submit", async e => {
   e.preventDefault(); const f = Object.fromEntries(new FormData(e.target)), out = clear($("#sbx-out")), btn = $("#sbx-run");
+  const body = { source: f.source, symbol: f.symbol, preset: f.preset, prompt: f.prompt, note: f.note };
+  if (f.source === "custom_api") Object.assign(body, { base_url: $("#sbx-c-url").value, model: $("#sbx-c-model").value, api_key: $("#sbx-c-key").value });
+  if (f.source === "agent") body.agent = $("#sbx-agent").value;
+  if (f.source === "http") Object.assign(body, { url: $("#sbx-h-url").value, api_key: $("#sbx-h-key").value });
   btn.disabled = true; $("#sbx-msg").textContent = "Агент думает…"; $("#sbx-msg").classList.remove("bad");
   try {
-    const r = await api("/api/sandbox/run", { method: "POST", body: f });
+    const r = await api("/api/sandbox/run", { method: "POST", body });
     $("#sbx-msg").textContent = `Готово за ${fmt(r.latency_ms / 1000, 1)} с`;
     const m = r.model, v = r.verdict;
     add(out, h("div", { class: "card form sbx-res" },
       h("h2", {}, `${r.preset} · ${r.symbol}`),
-      m ? h("dl", { class: "kv" }, [["Решение модели", m.action], ["Количество", m.quantity ?? "-"], ["Тип", m.order_type || "market"], ["Уверенность", m.confidence ?? "-"]].flatMap(([k, x]) => [h("dt", {}, k), h("dd", {}, String(x))])) : null,
+      m ? h("dl", { class: "kv" }, [["Решение", m.action], ["Количество", m.quantity ?? "-"], ["Тип", m.order_type || "market"], ["Уверенность", m.confidence ?? "-"]].flatMap(([k, x]) => [h("dt", {}, k), h("dd", {}, String(x))])) : null,
       m && m.rationale ? h("p", { class: "agent-msg" }, m.rationale) : null,
       r.note ? h("p", { class: "mu" }, r.note) : null,
-      v ? [h("h3", { class: "sec" }, "Вердикт шлюза"), h("p", {}, decPill(v.decision), h("span", { class: "mu" }, `  ${v.execution_note}`)),
-        h("p", { class: "agent-msg" }, v.agent_message),
-        v.checks.filter(c => c.status !== "skip").map(c => h("div", { class: "chk " + c.status }, h("div", { class: "st" }, ST[c.status] || c.status), h("div", {}, h("div", { class: "t" }, c.name), h("div", { class: "m" }, c.message))))] : null,
+      v ? sbxVerdict(v) : null,
       r.tokens && r.tokens.prompt ? h("p", { class: "hint" }, `Токены: запрос ${r.tokens.prompt}, ответ ${r.tokens.completion}`) : null));
   } catch (err) { $("#sbx-msg").textContent = err.message; $("#sbx-msg").classList.add("bad"); }
   btn.disabled = false;
+});
+$("#sbx-rules").addEventListener("click", async () => {
+  const out = clear($("#sbx-out")); $("#sbx-msg").textContent = "Проверяю правила…"; $("#sbx-msg").classList.remove("bad");
+  try {
+    const r = await api("/api/sandbox/rules", { method: "POST", body: { symbol: $("#sbx-symbol").value } });
+    $("#sbx-msg").textContent = "";
+    add(out, h("div", { class: "card form sbx-res" }, h("h2", {}, `Проверка правил · ${r.symbol}`), r.note ? h("p", { class: "mu" }, r.note) : null,
+      r.items.map(i => h("div", { class: "chk" }, h("div", { class: "st" }, decPill(i.decision)), h("div", {}, h("div", { class: "t" }, i.title), h("div", { class: "m" }, i.reasons.length ? i.reasons.join(" ") : i.message))))));
+  } catch (err) { $("#sbx-msg").textContent = err.message; $("#sbx-msg").classList.add("bad"); }
 });
 
 /* вердикты */
@@ -374,7 +395,7 @@ async function initChat() {
   }
   try { S.agents = (await api("/api/agents")).items; } catch (e) { /* список агентов не обязателен */ }
   const sel = $("#chat-agent"); sel.length = 1;
-  (S.agents || []).filter(a => !a.revoked).forEach(a => sel.append(h("option", { value: a.id, selected: a.id === S.chatAgent }, a.name)));
+  (S.agents || []).filter(a => !a.revoked).forEach(a => sel.append(h("option", { value: a.id, selected: a.id === S.chatAgent }, a.name + ({ llm: " (нейросеть)", http: " (по адресу)" }[a.kind] || " (внешний)"))));
   sel.onchange = () => { S.chatAgent = sel.value; renderChat(); };
   renderChat();
 }
@@ -423,7 +444,7 @@ $("#composer").addEventListener("submit", async e => {
   const pend = paint({ role: "bot", text: "Считаю…", pending: true }); $("#send").disabled = true;
   try {
     const r = await api("/api/chat", { method: "POST", body: { sid, text, agent: S.chatAgent || "" } }); pend.remove();
-    (CHATS[key] = CHATS[key] || []).push({ role: "bot", text: r.answer, images: r.images || [], sid }); if (key === chatKey()) renderChat();
+    (CHATS[key] = CHATS[key] || []).push({ role: "bot", text: (r.note ? r.note + "\n\n" : "") + r.answer, images: r.images || [], sid }); if (key === chatKey()) renderChat();
   } catch (err) {
     pend.remove(); (CHATS[key] = CHATS[key] || []).push({ role: "bot", text: "Не получилось: " + err.message + ". Повторите запрос или уточните тикер и период.", images: [], sid }); if (key === chatKey()) renderChat();
   }
@@ -487,30 +508,102 @@ const loadAgents = guard(async () => {
     }) }, ["shadow", "enforce"].map(m => h("option", { value: m, selected: a.mode === m }, MODE_NOTE[m])));
     const prof = h("select", { "aria-label": `Контекст агента ${a.name}`, disabled: a.revoked, onchange: guard(async e => { await api("/api/agents", { method: "PATCH", body: { id: a.id, context_profile: e.target.value } }); toast("Профиль контекста изменён"); }) },
       [["minimal", "минимальный"], ["standard", "стандартный"], ["full", "полный"]].map(([k, l]) => h("option", { value: k, selected: a.context_profile === k }, l)));
-    body.append(h("tr", {}, h("td", {}, h("div", {}, h("b", {}, a.name)), h("div", { class: "mu num", style: "font-size:12px" }, a.id)), h("td", {}, mode), h("td", {}, prof), h("td", { class: "num r" }, a.verdicts),
-      h("td", {}, a.revoked ? "Отозван" : "Активен"),
-      h("td", { class: "r" }, a.revoked ? null : h("button", { class: "btn ghost sm", type: "button", onclick: guard(async () => { if (confirm(`Отозвать ключ агента ${a.name}? Это действие нельзя отменить.`)) { await api("/api/agents", { method: "PATCH", body: { id: a.id, revoked: true } }); loadAgents(); } }) }, "Отозвать"))));
+    const KIND_NAME = { external: "Приходит сам", llm: "Нейросеть", http: "Агент по адресу" };
+    const ago = a.last_seen ? `последний вызов ${a.last_seen.slice(5, 16).replace("T", " ")}` : "обращений не было";
+    const acts = [];
+    if ((a.kind === "llm" || a.kind === "http") && !a.revoked) acts.push(h("button", { class: "btn ghost sm", type: "button", onclick: guard(async e => {
+      e.target.disabled = true; e.target.textContent = "Думает…";
+      try { showRun(await api("/api/agents/run", { method: "POST", body: { id: a.id } }), a); loadAgents(); loadState(); }
+      finally { e.target.disabled = false; e.target.textContent = "Запустить"; } }) }, "Запустить"));
+    if (!a.revoked) acts.push(h("button", { class: "btn ghost sm", type: "button", onclick: guard(async () => {
+      if (confirm(`Отозвать агента ${a.name}? Он перестанет принимать заявки; история останется.`)) { await api("/api/agents", { method: "PATCH", body: { id: a.id, revoked: true } }); loadAgents(); } }) }, "Отозвать"));
+    acts.push(h("button", { class: "btn ghost sm", type: "button", onclick: guard(async () => {
+      if (!confirm(`Удалить агента «${a.name}»?\n\nБудут удалены его ключи и все его вердикты (${a.verdicts}) из журнала. В журнале останется одна запись «удалено N записей» без содержимого. Действие необратимо.`)) return;
+      const r = await api(`/api/agents?id=${encodeURIComponent(a.id)}`, { method: "DELETE" });
+      toast(`Агент удалён, записей убрано: ${r.removed_verdicts}`); loadAgents(); loadState(); }) }, "Удалить"));
+    body.append(h("tr", {}, h("td", {}, h("div", {}, h("b", {}, a.name)), h("div", { class: "mu num", style: "font-size:12px" }, a.id)),
+      h("td", {}, h("span", { class: "kind-tag" }, KIND_NAME[a.kind] || a.kind), h("div", { class: "mu", style: "font-size:12px" }, ago)),
+      h("td", {}, mode), h("td", {}, prof), h("td", { class: "num r" }, a.verdicts),
+      h("td", {}, a.revoked ? "Отозван" : "Активен"), h("td", { class: "r" }, acts)));
   });
   $("#a-empty").hidden = r.items.length > 0; $("#at").parentElement.hidden = r.items.length === 0;
 });
+const ROUTE_NOTE = {
+  n8n: "Сервис сам отправляет намерения в Finvex. Вы получите адрес, заголовок и пример тела для узла HTTP-запроса.",
+  mcp: "Приложение с MCP подключает Finvex как инструмент. Вы получите готовый блок конфигурации.",
+  code: "Свой код отправляет намерения запросом. Вы получите примеры на Python и curl.",
+  http: "Finvex сам отправляет контекст рынка на адрес вашего агента (n8n, Dify, своего сервиса) и ждёт JSON с полем action.",
+  llm: "Finvex сам вызывает модель с вашей ролью и тикерами. Ключ можно не вводить, если он задан в «Настройках».",
+};
+function agRouteSync() {
+  const r = $("#ag-route").value;
+  $("#ag-llm").hidden = r !== "llm"; $("#ag-http").hidden = r !== "http";
+  $("#ag-route-note").textContent = ROUTE_NOTE[r] || "";
+  $("#ag-submit").textContent = { llm: "Подключить нейросеть", http: "Подключить агента по адресу" }[r] || "Создать и показать инструкцию";
+}
+$("#ag-route").addEventListener("change", agRouteSync); agRouteSync();
 $("#add-form").addEventListener("submit", guard(async e => {
   e.preventDefault();
-  const f = new FormData(e.target);
-  const r = await api("/api/agents", { method: "POST", body: { name: f.get("name"), mode: f.get("mode"), context_profile: f.get("context_profile") } });
-  e.target.reset(); $("#add-box").open = false; showKey(r); loadAgents();
+  const f = new FormData(e.target), route = f.get("route") || "n8n";
+  const body = { name: f.get("name"), mode: f.get("mode"), context_profile: f.get("context_profile"), kind: { llm: "llm", http: "http" }[route] || "external" };
+  if (route === "llm") {
+    body.api_key = f.get("api_key");
+    body.config = { model: f.get("model"), base_url: f.get("base_url"), symbols: f.get("symbols"), system_prompt: f.get("system_prompt") };
+  }
+  if (route === "http") { body.api_key = f.get("h_key"); body.config = { url: f.get("url"), symbols: f.get("h_symbols"), system_prompt: f.get("h_prompt") }; }
+  const r = await api("/api/agents", { method: "POST", body });
+  e.target.reset(); agRouteSync(); $("#add-box").open = false; showCreated(r, route); loadAgents();
 }));
 const kd = $("#keydlg");
-function showKey(r) {
-  const url = location.origin;
+let AG_WAIT = null;
+kd.addEventListener("close", () => clearInterval(AG_WAIT));
+function waitForAgent(id, el) {
+  clearInterval(AG_WAIT); let n = 0;
+  AG_WAIT = setInterval(async () => {
+    try {
+      const r = await api("/api/agents"), a = r.items.find(x => x.id === id);
+      if (a && a.calls > 0) { el.textContent = `Агент подключился: первый запрос принят в ${a.last_seen.slice(11, 19)}. Окно можно закрыть.`; clearInterval(AG_WAIT); loadAgents(); }
+      else if (++n > 72) { el.textContent = "Обращения пока не было. Проверьте адрес и ключ и что агент запущен на этом компьютере."; clearInterval(AG_WAIT); }
+    } catch (_) { /* повторим при следующем опросе */ }
+  }, 2500);
+}
+const copyText = t => guard(async () => { await navigator.clipboard.writeText(t); toast("Скопировано"); });
+function codeBlock(title, text) {
+  return [title ? h("h3", { class: "sec" }, title) : null, h("div", { class: "code" }, text), h("button", { class: "btn ghost sm", type: "button", onclick: copyText(text) }, "Скопировать")];
+}
+function showCreated(r, route) {
+  const a = r.agent, url = location.origin;
+  if (a.kind === "llm" || a.kind === "http") {
+    add(clear(kd), h("h2", { id: "kd-title" }, `Агент «${a.name}» подключён`),
+      h("p", { class: "mu" }, a.kind === "llm"
+        ? "Finvex сам вызывает модель. Нажмите «Запустить» в строке агента: он получит проверенный контекст по своим тикерам, а решение пройдёт через шлюз."
+        : "Finvex отправит контекст рынка на адрес агента и разберёт ответ. Нажмите «Запустить» в строке агента. Ответ должен быть JSON с полем action: buy, sell или hold."),
+      h("p", { class: "mu" }, "В режиме проверки заявки никуда не уходят. Агента можно заранее проверить в «Песочнице»."),
+      h("div", { class: "btns" }, h("button", { class: "btn solid", type: "button", onclick: () => kd.close() }, "Понятно")));
+    return kd.showModal();
+  }
+  const body = JSON.stringify({ symbol: "SBER", side: "buy", quantity: 10, rationale: "причина решения" });
+  const curl = `curl -X POST ${url}/gateway/v1/propose \\\n  -H "Authorization: Bearer ${r.key}" -H "Content-Type: application/json" \\\n  -d '${body}'`;
+  const py = `import requests\nr = requests.post("${url}/gateway/v1/propose",\n                  headers={"Authorization": "Bearer ${r.key}"},\n                  json=${body})\nprint(r.json()["decision"], r.json()["agent_message"])`;
   const mcp = JSON.stringify({ mcpServers: { finvex: { command: "python", args: ["-m", "finvex.gateway.mcp", "--url", url, "--key", r.key] } } }, null, 2);
-  const curl = `curl -X POST ${url}/gateway/v1/propose \\\n  -H "Authorization: Bearer ${r.key}" -H "Content-Type: application/json" \\\n  -d '{"symbol":"SBER","side":"buy","quantity":10,"rationale":"причина решения"}'`;
-  const copy = t => guard(async () => { await navigator.clipboard.writeText(t); toast("Скопировано"); });
-  add(clear(kd), h("h2", { id: "kd-title" }, `Агент «${r.agent.name}» создан`),
-    h("p", { class: "mu" }, "Ключ показывается один раз. В хранилище остаётся только его хэш, восстановить ключ нельзя."),
-    h("div", { class: "code" }, r.key), h("button", { class: "btn ghost sm", type: "button", onclick: copy(r.key) }, "Скопировать ключ"),
-    h("h3", { class: "sec" }, "Подключение через MCP"), h("div", { class: "code" }, mcp), h("button", { class: "btn ghost sm", type: "button", onclick: copy(mcp) }, "Скопировать конфигурацию"),
-    h("h3", { class: "sec" }, "Подключение по HTTP"), h("div", { class: "code" }, curl),
-    h("div", { class: "btns" }, h("button", { class: "btn solid", type: "button", onclick: () => kd.close() }, "Ключ сохранён")));
+  const status = h("p", { class: "mu", "aria-live": "polite" }, "Ждём первого обращения агента…");
+  const parts = { n8n: [
+    h("p", { class: "mu" }, "В сценарии добавьте узел HTTP-запроса и заполните поля так:"),
+    codeBlock("Адрес (метод POST)", `${url}/gateway/v1/propose`), codeBlock("Заголовок", `Authorization: Bearer ${r.key}`),
+    codeBlock("Тело запроса (JSON)", body), codeBlock("Контекст рынка перед решением (метод GET, тот же заголовок)", `${url}/gateway/v1/context?symbol=SBER`)],
+    mcp: [codeBlock("Конфигурация MCP", mcp)],
+    code: [codeBlock("Python", py), codeBlock("curl", curl)] }[route] || [];
+  add(clear(kd), h("h2", { id: "kd-title" }, `Агент «${a.name}» создан`),
+    h("p", { class: "mu" }, "Ключ показывается один раз: в хранилище остаётся только его хэш."), codeBlock("Ключ агента", r.key), parts,
+    h("p", { class: "mu" }, "Адрес доступен только на этом компьютере (127.0.0.1): агент, запущенный на другом компьютере, до него не дойдёт без туннеля."),
+    status, h("div", { class: "btns" }, h("button", { class: "btn solid", type: "button", onclick: () => kd.close() }, "Ключ сохранён")));
+  kd.showModal(); waitForAgent(a.id, status);
+}
+function showRun(r, a) {
+  const rows = r.results.map(x => h("div", {}, h("b", {}, x.symbol), " · ",
+    x.status === "verdict" ? `${DEC[x.verdict.decision] || x.verdict.decision}: ${x.verdict.agent_message || ""}` : (x.note || x.status)));
+  add(clear(kd), h("h2", { id: "kd-title" }, `Запуск агента «${a.name}»`), h("p", { class: "mu" }, `Режим: ${MODE_NOTE[r.mode] || r.mode}`),
+    h("div", { class: "run-res" }, rows), h("div", { class: "btns" }, h("button", { class: "btn solid", type: "button", onclick: () => kd.close() }, "Закрыть")));
   kd.showModal();
 }
 

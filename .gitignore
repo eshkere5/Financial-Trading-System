@@ -50,3 +50,7 @@ configs/llm_shared.yaml
 *.pth
 /archive/
 /configs/*.user.yaml
+
+# LiteLLM: конфигурация и ключи не публикуются
+/deploy/litellm/litellm_config.yaml
+/.env.litellm

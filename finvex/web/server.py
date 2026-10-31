@@ -17,6 +17,7 @@ from finvex.modules import ModuleDisabled, ModuleError
 from .chat import Chat
 from .adapters_admin import AdaptersAdmin, AdminError
 from .sandbox import Sandbox, SandboxError
+from .llm_providers import PRESETS
 from .settings import LlmSettings, SettingsError
 
 STATIC = Path(__file__).parent / "static"
@@ -29,10 +30,10 @@ MAX_BODY = 64 * 1024
 # Серверная проверка модуля - настоящая защита; скрытие элементов в интерфейсе только удобство.
 API_GATES = {"chat": "hub", "sandbox/presets": "hub", "sandbox/run": "hub", "analytics": "analytics", "tsfm": "analytics", "adapters": "data",
              "adapters/check": "data", "verdicts": "guard", "rules": "guard", "agents": "guard", "intent": "guard", "context": "guard",
-             "report": "guard", "export.csv": "guard"}
+             "report": "guard", "export.csv": "guard", "agents/run": "guard", "sandbox/rules": "hub"}
 
 
-def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | None" = None, llm_call=None) -> ThreadingHTTPServer:
+def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | None" = None, llm_call=None, agent_llm=None) -> ThreadingHTTPServer:
     token = secrets.token_urlsafe(24)
     from finvex.analysis.kronos import service as tsfm_service
     from finvex.feeds.analytics_feeder import AnalyticsFeeder
@@ -54,7 +55,10 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
     chat = Chat(out_dir, kronos_enabled=tsfm_enabled, kronos_call=tsfm_call)
     llm = LlmSettings()
     admin = AdaptersAdmin(root or Path("."))
-    sandbox = Sandbox(gw, llm, llm_call)
+    from finvex.gateway.runner import AgentRunner
+    from finvex.gateway.agents import parse_symbols
+    runner = AgentRunner(gw, agent_llm, lambda: {"base_url": llm.public()["base_url"], "model": llm.public()["model"], "api_key": llm.api_key()})
+    sandbox = Sandbox(gw, llm, llm_call, runner)
     ui_agent_lock = threading.Lock()
     bound = [port]
 
@@ -181,11 +185,11 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
                 return self._json(200, gw.report())
             if route == "settings":
                 if method == "GET":
-                    return self._json(200, llm.public())
+                    return self._json(200, {**llm.public(), "providers": PRESETS})
                 if method == "PUT":
                     b = self._body()
                     try:
-                        res = llm.save(b.get("base_url", ""), b.get("model", ""), b.get("api_key", ""), bool(b.get("clear")))
+                        res = llm.save(b.get("base_url", ""), b.get("model", ""), b.get("api_key", ""), bool(b.get("clear")), str(b.get("provider") or ""))
                     except SettingsError as e:
                         raise GatewayError("bad_settings", str(e), 422)
                     chat.reset()
@@ -207,15 +211,21 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
                 except AdminError as e:
                     raise GatewayError("bad_adapter", str(e), 422)
             if method == "GET" and route == "sandbox/presets":
-                return self._json(200, {"items": sandbox.presets(), "has_key": llm.has_key()})
+                return self._json(200, sandbox.info())
             if method == "POST" and route == "sandbox/run":
                 b = self._body()
                 try:
-                    return self._json(200, sandbox.run(str(b.get("preset", "")), str(b.get("symbol", "")), str(b.get("note", "")), str(b.get("prompt", ""))))
+                    return self._json(200, sandbox.run(str(b.get("preset", "")), str(b.get("symbol", "")), str(b.get("note", "")), str(b.get("prompt", "")),
+                                                       str(b.get("source") or "model"), {k: b.get(k) for k in ("base_url", "model", "api_key", "agent", "url")}))
                 except SandboxError as e:
                     raise GatewayError("sandbox", str(e), 409 if "ключ" in str(e) else 422)
             if method == "GET" and route == "tsfm":
                 return self._json(200, {**tsfm().status(), "active": tsfm_enabled()})
+            if method == "POST" and route == "sandbox/rules":
+                try:
+                    return self._json(200, sandbox.rules_check(str(self._body().get("symbol", ""))))
+                except SandboxError as e:
+                    raise GatewayError("sandbox", str(e), 422)
             if route == "analytics":
                 if method == "GET":
                     return self._json(200, {"items": gw.analytics.all()})
@@ -250,37 +260,54 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
                         return self._json(200, {"rules": gw.set_rules(self._body().get("rules") or {})})
                     except ValueError as e:
                         raise GatewayError("bad_rules", str(e), 422)
+            if method == "POST" and route == "agents/run":
+                b = self._body()
+                try:
+                    syms = parse_symbols(b["symbols"]) if b.get("symbols") else None
+                except ValueError as e:
+                    raise GatewayError("bad_symbols", str(e), 422)
+                return self._json(200, runner.run(str(b.get("id", "")), syms))
             if route == "agents":
                 if method == "GET":
                     cnt = gw.agent_counts()
-                    return self._json(200, {"items": [{**a.public(), "verdicts": cnt.get(a.id, 0)} for a in gw.agents.list()
-                                                      if a.name != "Ручная проверка" or cnt.get(a.id)]})
+                    return self._json(200, {"items": [{**a.public(), "verdicts": cnt.get(a.id, 0), "has_key": bool(gw.agents.secret(a.id, "api_key"))}
+                                                      for a in gw.agents.list() if a.name != "Ручная проверка" or cnt.get(a.id)]})
+                if method == "DELETE":
+                    return self._json(200, gw.delete_agent(g("id")))
                 b = self._body()
                 try:
                     if method == "POST":
+                        kind = str(b.get("kind") or "external")
                         ag, key = gw.agents.create(b.get("name", ""), b.get("mode", "shadow"), b.get("context_profile", "standard"),
-                                                   created=gw.clock().isoformat(timespec="seconds"))
-                        return self._json(200, {"agent": ag.public(), "key": key})
+                                                   created=gw.clock().isoformat(timespec="seconds"), kind=kind,
+                                                   config=b.get("config") or {}, api_key=str(b.get("api_key") or ""))
+                        return self._json(200, {"agent": ag.public(), "key": key if kind == "external" else None})
                     if method == "PATCH":
-                        kw = {k: b[k] for k in ("mode", "context_profile", "revoked") if k in b}
+                        kw = {k: b[k] for k in ("mode", "context_profile", "revoked", "config", "api_key", "clear_api_key") if k in b}
                         return self._json(200, {"agent": gw.agents.update(b.get("id", ""), **kw).public()})
                 except (ValueError, KeyError) as e:
                     raise GatewayError("bad_agent", str(e), 422)
             if method == "POST" and route == "chat":
                 b = self._body()
+                text, sid = str(b.get("text", ""))[:2000], str(b.get("sid", ""))
+                ag = next((a for a in gw.agents.list() if a.id == b.get("agent")), None)
+                if ag is not None and ag.kind == "llm":
+                    # диалог с самим агентом: вопрос уходит его модели с его ролью, а не аналитику Finvex
+                    return self._json(200, {"answer": runner.chat(ag.id, text), "images": [], "via": "agent"})
                 if not chat.available:
                     raise GatewayError("chat_off", chat.note, 503)
                 if not llm.has_key():
                     raise GatewayError("no_key", "Нужен ключ LLM: добавьте его во вкладке «Настройки»", 409)
-                text, sid = str(b.get("text", ""))[:2000], str(b.get("sid", ""))
-                ag = next((a for a in gw.agents.list() if a.id == b.get("agent")), None)
                 if ag is not None:
                     sid = "agent-" + ag.id
                     last = "; ".join(f"{v['intent']['side']} {v['intent']['symbol']} {v['intent']['quantity']:g} -> {v['decision']}"
                                      for v in gw.list_verdicts(5, "", ag.id))
                     text = (f"[Контекст: чат агента «{ag.name}», режим {ag.mode}. Последние решения шлюза: {last or 'нет'}. "
                             f"Отвечай про этого агента и его бумаги.]\n{text}")
-                return self._json(200, chat.ask(sid, text))
+                res = chat.ask(sid, text)
+                if ag is not None:
+                    res = {**res, "via": "analyst", "note": f"Агент «{ag.name}» работает снаружи или по адресу, и Finvex не может вести с ним диалог. Отвечает аналитик Finvex по решениям этого агента в шлюзе."}
+                return self._json(200, res)
             if method == "GET" and route == "chart":
                 p = chat.image_path(g("sid"), g("name"))
                 if not p:
@@ -306,6 +333,7 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
         def do_POST(self): self._dispatch("POST")
         def do_PUT(self): self._dispatch("PUT")
         def do_PATCH(self): self._dispatch("PATCH")
+        def do_DELETE(self): self._dispatch("DELETE")
 
     srv = ThreadingHTTPServer((host, port), H)
     srv.daemon_threads = True

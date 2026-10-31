@@ -169,7 +169,8 @@ def load_llm_shared(path: str = "configs/llm_shared.yaml") -> Dict[str, Any]:
     if not p.exists():
         return {"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash", "api_key": ""}
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    raw["api_key"] = os.environ.get("DEEPSEEK_API_KEY", raw.get("api_key", ""))
+    if (raw.get("provider") or "deepseek") == "deepseek":      # ключ DeepSeek не уходит чужим провайдерам
+        raw["api_key"] = os.environ.get("DEEPSEEK_API_KEY", raw.get("api_key", ""))
     return raw
 
 

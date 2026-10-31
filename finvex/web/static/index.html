@@ -50,30 +50,21 @@
   <section class="view" id="v-settings" aria-labelledby="title">
     <p class="lead">Аналитика и чат работают через модель, ключ к которой задаёте вы. Ключ хранится только на этом компьютере и в браузер не возвращается.</p>
     <form class="card form" id="llm-form" autocomplete="off">
-      <h2>Ключ для аналитики</h2>
+      <h2>Модель для аналитики, чата и агентов</h2>
       <p class="mu" id="llm-state" aria-live="polite"></p>
-      <label>Модель<input id="llm-model" name="model" maxlength="80" placeholder="deepseek-v4-flash" required></label>
-      <label>Адрес API<input id="llm-url" name="base_url" inputmode="url" placeholder="https://api.deepseek.com" required></label>
-      <label>API-ключ<input id="llm-key" name="api_key" type="password" placeholder="Вставьте новый ключ или оставьте пустым" autocomplete="new-password" spellcheck="false"></label>
+      <label>Провайдер<select id="llm-provider" name="provider"></select></label>
+      <p class="hint" id="llm-note"></p>
+      <label id="llm-url-wrap">Адрес API<input id="llm-url" name="base_url" inputmode="url" placeholder="https://api.example.com/v1" required></label>
+      <label>Модель<input id="llm-model" name="model" maxlength="80" placeholder="название модели из кабинета провайдера" required></label>
+      <label id="llm-key-wrap">API-ключ<input id="llm-key" name="api_key" type="password" placeholder="Вставьте новый ключ или оставьте пустым" autocomplete="new-password" spellcheck="false"></label>
       <div class="actions">
         <button class="btn solid" type="submit">Сохранить</button>
-        <button class="btn ghost" type="button" id="llm-check">Проверить ключ</button>
+        <button class="btn ghost" type="button" id="llm-check">Проверить подключение</button>
         <button class="btn ghost" type="button" id="llm-clear">Удалить ключ</button>
         <span class="hint" id="llm-msg" role="status" aria-live="polite"></span>
       </div>
-      <p class="hint">Переменная окружения DEEPSEEK_API_KEY приоритетнее ключа из формы. Файл настроек configs/llm_shared.yaml исключён из Git.</p>
+      <p class="hint">Ключ хранится только на этом компьютере (файл configs/llm_shared.yaml исключён из Git) и в браузер не возвращается. Переменная окружения DEEPSEEK_API_KEY применяется только к провайдеру DeepSeek.</p>
     </form>
-    <div class="card form" id="adapters" data-requires="data">
-      <h2>Источники данных</h2>
-      <p class="mu" id="ad-note"></p>
-      <div class="table-wrap"><table class="tbl" id="ad-table"><thead><tr><th scope="col">Имя</th><th scope="col">Тип</th><th scope="col">Откуда</th><th scope="col" class="r">Действия</th></tr></thead><tbody></tbody></table></div>
-      <form id="ad-form" class="row2" autocomplete="off">
-        <label>Имя<input name="name" placeholder="bybit_linear" maxlength="31" required></label>
-        <label>Тип<select name="type" id="ad-type"></select></label>
-        <label style="grid-column:1/-1">Параметры (JSON)<input name="params" value="{}" spellcheck="false"></label>
-        <div class="actions" style="grid-column:1/-1;margin:0"><button class="btn solid" type="submit">Добавить источник</button><span class="hint" id="ad-msg" role="status" aria-live="polite"></span></div>
-      </form>
-    </div>
   </section>
 
   <section class="view" id="v-modules" aria-labelledby="title">
@@ -85,15 +76,27 @@
   <section class="view" id="v-locked" aria-labelledby="title"></section>
 
   <section class="view" id="v-sandbox" aria-labelledby="title">
-    <p class="lead">Подключите ваш ключ LLM к тестовому агенту и посмотрите, что он решит и как это оценит шлюз. Заявки никуда не уходят: агенты песочницы всегда в режиме проверки.</p>
+    <p class="lead">Песочница — отдельный слой для проверки любого агента на живых данных. Её вердикты не попадают в журнал, заявки никуда не уходят, правила и данные рабочие.</p>
     <form class="card form" id="sbx-form" autocomplete="off">
       <div class="row2">
-        <label>Агент<select id="sbx-preset" name="preset"></select></label>
+        <label>Кто принимает решение<select id="sbx-source" name="source"></select></label>
         <label>Тикер<input id="sbx-symbol" name="symbol" value="BTCUSDT" maxlength="24" spellcheck="false"></label>
       </div>
+      <p class="hint" id="sbx-hint"></p>
+      <label id="sbx-preset-wrap">Роль агента<select id="sbx-preset" name="preset"></select></label>
       <label id="sbx-prompt-wrap" hidden>Промпт своего агента<textarea id="sbx-prompt" name="prompt" rows="4" maxlength="2000" placeholder="Например: торгуешь только откаты в сильном тренде, риск не больше 1%"></textarea></label>
+      <div id="sbx-opt-custom" class="row2" hidden>
+        <label>Адрес API<input id="sbx-c-url" placeholder="https://api.example.com/v1" inputmode="url"></label>
+        <label>Модель<input id="sbx-c-model" placeholder="название модели"></label>
+        <label style="grid-column:1/-1">Ключ (используется только для этого запуска)<input id="sbx-c-key" type="password" autocomplete="off"></label>
+      </div>
+      <label id="sbx-opt-agent" hidden>Подключённый агент<select id="sbx-agent"></select></label>
+      <div id="sbx-opt-http" class="row2" hidden>
+        <label>Адрес агента<input id="sbx-h-url" placeholder="http://localhost:5678/webhook/finvex" inputmode="url"></label>
+        <label>Ключ вызова (необязательно)<input id="sbx-h-key" type="password" autocomplete="off"></label>
+      </div>
       <label>Пожелание (необязательно)<input id="sbx-note" name="note" maxlength="500" placeholder="Например: сосредоточься на новостном фоне"></label>
-      <div class="actions"><button class="btn solid" type="submit" id="sbx-run">Запустить агента</button><span class="hint" id="sbx-msg" role="status" aria-live="polite"></span></div>
+      <div class="actions"><button class="btn solid" type="submit" id="sbx-run">Запустить</button><button class="btn ghost" type="button" id="sbx-rules">Проверить правила шлюза</button><span class="hint" id="sbx-msg" role="status" aria-live="polite"></span></div>
     </form>
     <div id="sbx-out" aria-live="polite"></div>
   </section>
@@ -120,20 +123,47 @@
     <details class="add" id="add-box">
       <summary class="btn solid">Подключить агента</summary>
       <form class="add-form" id="add-form">
+        <label style="grid-column:1/-1">Как работает ваш агент
+          <select name="route" id="ag-route">
+            <option value="n8n">Сервис или сценарий (n8n, Dify, бот): сам обращается к Finvex</option>
+            <option value="mcp">Приложение с MCP (Claude Desktop, Cursor и другие)</option>
+            <option value="code">Мой код (Python, curl)</option>
+            <option value="http">Агент по адресу: Finvex сам вызывает его (n8n, Dify, свой сервис)</option>
+            <option value="llm">Нейросеть: Finvex сам вызывает модель</option>
+          </select>
+        </label>
+        <p class="hint" id="ag-route-note" style="grid-column:1/-1"></p>
         <label>Имя<input name="name" type="text" maxlength="60" required placeholder="например, аналитик-бот" autocomplete="off"></label>
         <label>Режим<select name="mode"><option value="shadow">Только проверка (рекомендуется)</option><option value="enforce">Проверка и передача брокеру</option></select></label>
         <label>Контекст<select name="context_profile"><option value="standard">Стандартный</option><option value="minimal">Минимальный: цена и режим</option><option value="full">Полный: с портфелем</option></select></label>
-        <button class="btn solid" type="submit">Создать и показать ключ</button>
+        <div id="ag-http" hidden style="grid-column:1/-1">
+          <div class="add-form" style="grid-template-columns:repeat(2,minmax(0,1fr));margin:0;max-width:none">
+            <label style="grid-column:1/-1">Адрес агента<input name="url" inputmode="url" placeholder="http://localhost:5678/webhook/finvex  или  https://…"></label>
+            <label>Ключ вызова (необязательно)<input name="h_key" type="password" autocomplete="off" placeholder="уйдёт в заголовок Authorization: Bearer"></label>
+            <label>Тикеры через запятую<input name="h_symbols" placeholder="SBER, GAZP, BTCUSDT"></label>
+            <label style="grid-column:1/-1">Инструкции агенту (необязательно)<textarea name="h_prompt" rows="2" maxlength="2000" placeholder="Передаются в запросе в поле instructions"></textarea></label>
+          </div>
+        </div>
+        <div id="ag-llm" hidden style="grid-column:1/-1">
+          <div class="add-form" style="grid-template-columns:repeat(2,minmax(0,1fr));margin:0;max-width:none">
+            <label>Модель<input name="model" maxlength="80" placeholder="пусто: модель из «Настроек»"></label>
+            <label>Адрес API<input name="base_url" inputmode="url" placeholder="пусто: адрес из «Настроек»"></label>
+            <label>Ключ API агента<input name="api_key" type="password" autocomplete="off" placeholder="пусто: общий ключ из «Настроек»"></label>
+            <label>Тикеры через запятую<input name="symbols" placeholder="SBER, GAZP, BTCUSDT"></label>
+            <label style="grid-column:1/-1">Роль агента (промпт)<textarea name="system_prompt" rows="3" maxlength="2000" placeholder="Ты осторожный трейдер, берёшь сделки только с понятным риском…"></textarea></label>
+          </div>
+        </div>
+        <button class="btn solid" type="submit" id="ag-submit">Создать и показать инструкцию</button>
       </form>
     </details>
     <div class="table-wrap">
       <table class="tbl" id="at">
         <caption class="sr">Подключённые агенты</caption>
-        <thead><tr><th scope="col">Агент</th><th scope="col">Режим</th><th scope="col">Контекст</th><th scope="col" class="r">Вердиктов</th><th scope="col">Статус</th><th scope="col"><span class="sr">Действия</span></th></tr></thead>
+        <thead><tr><th scope="col">Агент</th><th scope="col">Подключение</th><th scope="col">Режим</th><th scope="col">Контекст</th><th scope="col" class="r">Вердиктов</th><th scope="col">Статус</th><th scope="col"><span class="sr">Действия</span></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
-    <p class="empty" id="a-empty" hidden>Агентов нет. Создайте первого и передайте ему ключ.</p>
+    <p class="empty" id="a-empty" hidden>Агентов нет. Подключите первого: внешнего по ключу, нейросеть или агента по адресу.</p>
   </section>
 </main>
 

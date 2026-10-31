@@ -12,6 +12,9 @@ from urllib.parse import urlparse
 
 import yaml
 
+from finvex.core.urlguard import UnsafeUrl, check_llm_url
+from finvex.web.llm_providers import LOCAL_KEY, preset
+
 DEFAULTS = {"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"}
 ENV_KEY = "DEEPSEEK_API_KEY"
 
@@ -30,8 +33,13 @@ class LlmSettings:
         except Exception:
             return {}
 
+    def _env_applies(self, raw: dict) -> bool:
+        """Переменная DEEPSEEK_API_KEY относится только к DeepSeek: чужому провайдеру этот ключ не отправляется."""
+        return (raw.get("provider") or DEFAULTS["provider"]) == "deepseek"
+
     def api_key(self) -> str:
-        return os.environ.get(ENV_KEY) or str(self._raw().get("api_key") or "")
+        raw = self._raw()
+        return (os.environ.get(ENV_KEY) if self._env_applies(raw) else "") or str(raw.get("api_key") or "")
 
     def has_key(self) -> bool:
         return bool(self.api_key())
@@ -41,13 +49,18 @@ class LlmSettings:
         return {"provider": raw.get("provider") or DEFAULTS["provider"], "base_url": raw.get("base_url") or DEFAULTS["base_url"],
                 "model": raw.get("model") or DEFAULTS["model"], "has_key": bool(key),
                 "key_hint": ("…" + key[-4:]) if len(key) >= 8 else ("задан" if key else ""),
-                "source": "env" if os.environ.get(ENV_KEY) else ("file" if raw.get("api_key") else "none")}
+                "source": "env" if (os.environ.get(ENV_KEY) and self._env_applies(raw)) else ("file" if raw.get("api_key") else "none"),
+                "needs_key": (preset(raw.get("provider") or DEFAULTS["provider"]) or {"needs_key": True})["needs_key"]}
 
-    def save(self, base_url: str, model: str, api_key: str = "", clear: bool = False) -> dict:
+    def save(self, base_url: str, model: str, api_key: str = "", clear: bool = False, provider: str = "") -> dict:
         base_url, model = (base_url or "").strip().rstrip("/"), (model or "").strip()
-        u = urlparse(base_url)
-        if u.scheme != "https" or not u.netloc:
-            raise SettingsError("адрес API должен начинаться с https://")
+        try:
+            base_url = check_llm_url(base_url)
+        except UnsafeUrl as exc:
+            raise SettingsError(f"адрес API: {exc}")
+        provider = (provider or "").strip()
+        if provider and preset(provider) is None:
+            raise SettingsError("неизвестный провайдер")
         if not model or len(model) > 80:
             raise SettingsError("укажите модель (до 80 символов)")
         api_key = (api_key or "").strip()
@@ -55,11 +68,16 @@ class LlmSettings:
             raise SettingsError("ключ выглядит неверно: проверьте, что он скопирован целиком и без пробелов")
         with self._lock:
             raw = self._raw()
-            raw.update({"provider": raw.get("provider") or DEFAULTS["provider"], "base_url": base_url, "model": model})
+            raw.update({"provider": provider or raw.get("provider") or DEFAULTS["provider"], "base_url": base_url, "model": model})
+            keyless = not (preset(raw["provider"]) or {"needs_key": True})["needs_key"]
             if clear:
                 raw.pop("api_key", None)
             elif api_key:
                 raw["api_key"] = api_key
+            elif keyless:
+                raw["api_key"] = LOCAL_KEY             # локальной модели ключ не нужен, но остальной код ждёт непустое значение
+            elif raw.get("api_key") == LOCAL_KEY:
+                raw.pop("api_key")                     # сменили локальную модель на облачную: заглушка не должна уйти провайдеру
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
