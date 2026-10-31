@@ -245,6 +245,8 @@ class KronosDefaultStrategy:
         )]
 
     def _get_kronos_signal(self, ticker: str, state: MarketState) -> Optional[TradingSignal]:
+        if self._kronos is None or getattr(self._kronos, "is_mock", True):
+            return None
         try:
             source = self._ohlcv.get(ticker)
             if source is None:

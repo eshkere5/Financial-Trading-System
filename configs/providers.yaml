@@ -18,7 +18,7 @@ market_data:
     params: {category: spot}
   local_csv:
     type: csv_file
-    param: {directory: data/candles, venue: MOEX}
+    params: {directory: data/candles, venue: MOEX}
 
 # Исполнение выключено. Даже если указать type, без enabled: true
 # будет использован disabled. Брокерские адаптеры (ВТБ и др.) подключаются сюда же.

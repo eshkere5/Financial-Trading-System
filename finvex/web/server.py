@@ -27,14 +27,31 @@ CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inlin
 RANGES = {"1d": ("1h", 12, "1 ч"), "1w": ("1h", 63, "1 ч"), "1m": ("1d", 22, "1 д"), "3m": ("1d", 66, "1 д"), "1y": ("1d", 250, "1 д")}
 MAX_BODY = 64 * 1024
 # Серверная проверка модуля - настоящая защита; скрытие элементов в интерфейсе только удобство.
-API_GATES = {"chat": "hub", "sandbox/presets": "hub", "sandbox/run": "hub", "analytics": "analytics", "adapters": "data",
+API_GATES = {"chat": "hub", "sandbox/presets": "hub", "sandbox/run": "hub", "analytics": "analytics", "tsfm": "analytics", "adapters": "data",
              "adapters/check": "data", "verdicts": "guard", "rules": "guard", "agents": "guard", "intent": "guard", "context": "guard",
              "report": "guard", "export.csv": "guard"}
 
 
 def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | None" = None, llm_call=None) -> ThreadingHTTPServer:
     token = secrets.token_urlsafe(24)
-    chat = Chat(out_dir)
+    from finvex.analysis.kronos import service as tsfm_service
+    from finvex.feeds.analytics_feeder import AnalyticsFeeder
+
+    def tsfm():
+        return tsfm_service.get_service(root)
+
+    def tsfm_enabled():
+        return (not getattr(gw, "demo", False) and gw.modules.is_enabled("analytics") and tsfm().enabled())
+
+    def tsfm_call(df, symbol, tf="1d", samples=3):
+        if not tsfm_enabled():
+            return {"status": "disabled", "error": "TSFM or analytics module disabled (or demo mode)"}
+        result = tsfm().forecast(df, symbol, tf, samples)
+        if result.get("status") == "ok" and tsfm_enabled():
+            AnalyticsFeeder(gw.analytics, tf=tf).push_kronos(symbol, result)
+        return result
+
+    chat = Chat(out_dir, kronos_enabled=tsfm_enabled, kronos_call=tsfm_call)
     llm = LlmSettings()
     admin = AdaptersAdmin(root or Path("."))
     sandbox = Sandbox(gw, llm, llm_call)
@@ -156,7 +173,7 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
                         raise GatewayError("bad_module", str(exc), 409)
             if method == "GET" and route == "state":
                 return self._json(200, {"demo": getattr(gw, "demo", False), "stats": gw.stats(), "chat": chat.available, "llm": llm.public(),
-                                        "chat_note": chat.note, "execution": {"enabled": gw.execution_enabled and gw.executor is not None}})
+                                        "chat_note": chat.note, "tsfm": {**tsfm().status(), "active": tsfm_enabled()}, "execution": {"enabled": gw.execution_enabled and gw.executor is not None}})
             if method == "GET" and route == "verdicts":
                 items = gw.list_verdicts(int(g("limit", "100") or 100), g("decision"), g("agent"))
                 return self._json(200, {"items": items})
@@ -197,6 +214,8 @@ def make_server(gw: Gateway, host: str, port: int, out_dir: Path, root: "Path | 
                     return self._json(200, sandbox.run(str(b.get("preset", "")), str(b.get("symbol", "")), str(b.get("note", "")), str(b.get("prompt", ""))))
                 except SandboxError as e:
                     raise GatewayError("sandbox", str(e), 409 if "ключ" in str(e) else 422)
+            if method == "GET" and route == "tsfm":
+                return self._json(200, {**tsfm().status(), "active": tsfm_enabled()})
             if route == "analytics":
                 if method == "GET":
                     return self._json(200, {"items": gw.analytics.all()})

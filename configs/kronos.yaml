@@ -1,4 +1,10 @@
 # configs/kronos.yaml
+# Runtime uses bundled inference code. Weights are prepared explicitly.
+enabled: true
+local_files_only: true
+allow_mock: false
+cache_ttl_seconds: 900
+cache_max_entries: 128
 model_name: NeoQuasar/Kronos-base
 tokenizer_name: NeoQuasar/Kronos-Tokenizer-base
 device: cpu          # смени на cuda:0 если есть GPU — Kronos-base (102.3M) заметно медленнее на CPU

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "source": "bundled inference source; see _vendor/UPSTREAM.json",
+  "model": {
+    "repo_id": "NeoQuasar/Kronos-base",
+    "revision": "2b554741eca47781b64468546e77fef3e85130e6"
+  },
+  "tokenizer": {
+    "repo_id": "NeoQuasar/Kronos-Tokenizer-base",
+    "revision": "0e0117387f39004a9016484a186a908917e22426"
+  }
+}

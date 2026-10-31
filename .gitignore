@@ -41,3 +41,12 @@ configs/llm_shared.yaml
 /configs/providers.local.yaml
 /.env
 /.venv/
+
+# TSFM weights stay in the Hugging Face cache, never Git. Bundled source is tracked.
+/models/
+/weights/
+*.safetensors
+*.pt
+*.pth
+/archive/
+/configs/*.user.yaml

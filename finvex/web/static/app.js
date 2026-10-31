@@ -83,7 +83,8 @@ const loadState = guard(async () => {
   add(meta, item("Данные", s.demo ? "демо, синтетика" : "живые"),
     item("Исполнение", s.execution.enabled ? "включено" : "не подключено"),
     item("Журнал", chain.ok ? `цел, записей ${chain.checked}` : "НАРУШЕН", !chain.ok),
-    item("Модули", modSummary()));
+    item("Модули", modSummary()),
+    item("TSFM", !s.tsfm?.active ? "выключен" : ({not_loaded: "готов к загрузке", loading: "загрузка", ready: "модель загружена", unavailable: "недоступен"}[s.tsfm.state] || s.tsfm.state), s.tsfm?.active && s.tsfm.state === "unavailable"));
   renderSummary(s.stats);
 });
 function renderSummary(st) {

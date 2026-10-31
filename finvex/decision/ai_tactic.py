@@ -516,6 +516,8 @@ class AITacticStrategy:
         )]
 
     def _get_kronos_signal(self, ticker: str, state: MarketState) -> Optional[TradingSignal]:
+        if self._kronos is None or getattr(self._kronos, "is_mock", True):
+            return None
         if not hasattr(self, "_ksig_cache"):
             self._ksig_cache = {}
             self._ksig_ttl = 900.0  # прогноз Kronos максимум раз в 15 мин на тикер

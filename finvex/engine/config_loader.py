@@ -258,17 +258,18 @@ class KronosConfig:
     sample_count:      int   = 8
     temperature:       float = 1.0
     top_p:             float = 0.9
+    enabled: bool = True
+    local_files_only: bool = True
+    allow_mock: bool = False
+    cache_dir: Optional[str] = None
+    model_revision: Optional[str] = None
+    tokenizer_revision: Optional[str] = None
+    model_path: Optional[str] = None
+    tokenizer_path: Optional[str] = None
 
 
 def load_kronos_config(path: str = "configs/kronos.yaml") -> KronosConfig:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    return KronosConfig(
-        model_name        = raw.get("model_name",        "NeoQuasar/Kronos-small"),
-        tokenizer_name    = raw.get("tokenizer_name",    "NeoQuasar/Kronos-Tokenizer-base"),
-        device            = raw.get("device",            "cpu"),
-        max_context       = int(raw.get("max_context",       512)),
-        prediction_length = int(raw.get("prediction_length", 120)),
-        sample_count      = int(raw.get("sample_count",      8)),
-        temperature       = float(raw.get("temperature",     1.0)),
-        top_p             = float(raw.get("top_p",           0.9)),
-    )
+    from finvex.analysis.kronos.service import load_config
+    from dataclasses import fields
+    raw = load_config(Path(path))
+    return KronosConfig(**{f.name: raw[f.name] for f in fields(KronosConfig) if f.name in raw})

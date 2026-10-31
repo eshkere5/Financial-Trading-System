@@ -10,8 +10,10 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9_.\-]{1,80}$")
 
 
 class Chat:
-    def __init__(self, out_dir: "str | Path") -> None:
+    def __init__(self, out_dir: "str | Path", *, kronos_enabled=None, kronos_call=None) -> None:
         self.out_dir = Path(out_dir)
+        self._kronos_enabled = kronos_enabled or (lambda: True)
+        self._kronos_call = kronos_call
         self.note = ""
         self._ma = None
         self._sessions: dict = {}
@@ -41,7 +43,8 @@ class Chat:
                 out = self.out_dir / sid
                 out.mkdir(parents=True, exist_ok=True)
                 try:
-                    sess = ma.Session(out_dir=out, use_kronos=False)
+                    sess = ma.Session(out_dir=out, use_kronos=self._kronos_enabled())
+                    sess.kronos_call = self._kronos_call
                 except TypeError:
                     sess = ma.Session(out)
                 ma.Sandbox(sess)
@@ -55,6 +58,7 @@ class Chat:
             raise ValueError("некорректная сессия")
         sess, agent = self._session(sid)
         with self._lock:
+            sess.use_kronos = self._kronos_enabled()
             answer = agent.ask(text)
         imgs = [Path(p).name for p in getattr(sess, "turn_images", []) or []]
         return {"answer": str(answer), "images": imgs}

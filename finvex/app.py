@@ -25,7 +25,8 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
     signal_cfg = cfg.signal
 
     kronos_cfg_path = Path("configs/kronos.yaml")
-    kronos_cfg = yaml.safe_load(kronos_cfg_path.read_text()) if kronos_cfg_path.exists() else {}
+    from finvex.analysis.kronos.service import load_config
+    kronos_cfg = load_config(kronos_cfg_path)
     kronos = KronosAdapter(kronos_cfg) if kronos_cfg else None
 
     collector = DataCollector(historical_dir="data/raw/historical")
@@ -109,7 +110,8 @@ def _cmd_live(args: argparse.Namespace) -> None:
     signal_cfg = cfg.signal
 
     kronos_cfg_path = Path("configs/kronos.yaml")
-    kronos_cfg = yaml.safe_load(kronos_cfg_path.read_text()) if kronos_cfg_path.exists() else {}
+    from finvex.analysis.kronos.service import load_config
+    kronos_cfg = load_config(kronos_cfg_path)
     kronos = KronosAdapter(kronos_cfg) if kronos_cfg else None
 
     # ── News ─────────────────────────────────────────────────────

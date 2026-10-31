@@ -76,7 +76,11 @@ class AnalyticsFeeder:
         score = kronos_score(kr)
         if score is None:
             return None
-        return self.store.set_kronos(symbol, round(score, 4), kronos_valid_until(self.clock(), self.tf).isoformat(), kr.get("volatility_norm"))
+        now = self.clock()
+        until = _parse_time(kr.get("valid_until"), now) if kr.get("valid_until") else kronos_valid_until(now, self.tf)
+        if until <= now:
+            return None
+        return self.store.set_kronos(symbol, round(score, 4), until.isoformat(), kr.get("volatility_norm"))
 
     def push_news(self, symbol: str, row: dict) -> Optional[dict]:
         if not isinstance(row, dict) or row.get("sentiment") is None:
@@ -118,7 +122,7 @@ class AnalyticsFeeder:
 
 
 # ---- настоящие источники (нужны сеть, модель Kronos и ключ LLM; в закрытой среде не запускались) -----------------
-def real_kronos_source() -> Callable[[str, str], dict]:
+def real_kronos_source(service=None) -> Callable[[str, str], dict]:
     def fn(symbol: str, tf: str) -> dict:
         from finvex import market_analysis as ma
         inst = ma.resolve_instrument({"symbol": symbol})
@@ -126,7 +130,8 @@ def real_kronos_source() -> Callable[[str, str], dict]:
             return {"status": "error", "error": "инструмент не найден"}
         end = datetime.now(MSK)
         req = ma.Request(text=f"feeder {symbol}", instruments=[inst], start=end - timedelta(days=20 if tf != "1d" else 120), end=end, timeframe=tf)
-        return ma.kronos_module(ma.add_indicators(ma.load_market_data(inst, req)), symbol, tf, 3)
+        frame = ma.add_indicators(ma.load_market_data(inst, req))
+        return service.forecast(frame, symbol, tf, 3) if service is not None else ma.kronos_module(frame, symbol, tf, 3)
     return fn
 
 
@@ -144,18 +149,23 @@ def real_news_source(hours_back: int = 12, max_llm: int = 8) -> Callable[[str], 
 
 
 def start_background(store, symbols: List[str], interval_s: float = 900.0, tf: str = "1h", say: Callable[[str], None] = print,
-                     kronos_source=None, news_source=None) -> threading.Event:
+                     kronos_source=None, news_source=None, enabled=None) -> threading.Event:
     """Запускает подачу в потоке. Возвращает Event: set() останавливает поток."""
     stop = threading.Event()
     feeder = AnalyticsFeeder(store, kronos_source=kronos_source or real_kronos_source(), news_source=news_source or real_news_source(), tf=tf)
 
     def loop() -> None:
         while not stop.is_set():
+            if enabled is not None and not enabled():
+                stop.wait(min(interval_s, 1.0))
+                continue
             rep = feeder.tick(symbols)
             say(f"[feeder] Kronos {rep['kronos']}, новостей {rep['news']}, пропущено {len(rep['skipped'])}, ошибок {len(rep['errors'])}")
             for line in (rep["skipped"] + rep["errors"])[:5]:
                 say(f"[feeder]   {line}")
             stop.wait(interval_s)
 
-    threading.Thread(target=loop, name="analytics_feeder", daemon=True).start()
+    thread = threading.Thread(target=loop, name="analytics_feeder", daemon=True)
+    stop.thread = thread
+    thread.start()
     return stop

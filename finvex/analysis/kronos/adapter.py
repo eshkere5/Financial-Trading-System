@@ -11,7 +11,7 @@ KronosAdapter — обёртка над KronosTokenizer + Kronos + KronosPredict
 
 from __future__ import annotations
 import logging
-import sys
+import threading
 from pathlib import Path
 from dataclasses import dataclass, is_dataclass, asdict
 from typing import Optional, Dict, Any
@@ -22,17 +22,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 def _find_kronos_repo() -> Path:
-    """Где лежит клон Kronos: FINVEX_KRONOS_PATH, затем third_party/Kronos, Kronos/ в корне, соседняя папка."""
-    import os
-    root = Path(__file__).resolve().parents[3]
-    env = os.environ.get("FINVEX_KRONOS_PATH")
-    candidates = ([Path(env)] if env else []) + [
-        root / "third_party" / "Kronos", root / "Kronos", root.parent / "Kronos",
-    ]
-    for c in candidates:
-        if (c / "model").exists():
-            return c
-    return candidates[0] if env else root / "third_party" / "Kronos"
+    """Runtime source ships inside the installed Finvex package."""
+    return Path(__file__).resolve().parent / "_vendor"
 
 
 KRONOS_REPO_PATH = _find_kronos_repo()
@@ -97,7 +88,7 @@ class KronosState:
 class KronosAdapter:
     """
     Обёртка над KronosTokenizer + Kronos + KronosPredictor.
-    Если модель не установлена — работает в mock-режиме (держит последнюю свечу).
+    Если модель недоступна — прогноз запрещён; mock допускается только явно для тестов.
 
     ### FIXED 2026-08-02 ###
     Публичный атрибут `is_mock` позволяет вызывающему коду отличить синтетический
@@ -108,25 +99,38 @@ class KronosAdapter:
 
     def __init__(self, cfg: dict) -> None:
         self.cfg = asdict(cfg) if is_dataclass(cfg) else dict(cfg)
+        self._predict_lock = threading.RLock()
+        self.load_error = None
         self.predictor = None
         self.is_mock = True   # ### FIXED 2026-08-02 ### снимается в _try_load()
         self._try_load()
 
     def _try_load(self) -> None:
         try:
-            if str(KRONOS_REPO_PATH) not in sys.path:
-                sys.path.insert(0, str(KRONOS_REPO_PATH))
-            from model import Kronos, KronosTokenizer, KronosPredictor  # type: ignore
+            if not self.cfg.get("enabled", True):
+                self.load_error = "TSFM disabled in configuration"
+                return
+            from ._vendor.model import Kronos, KronosTokenizer, KronosPredictor
             import torch
 
+            common = {"local_files_only": bool(self.cfg.get("local_files_only", True))}
+            if self.cfg.get("cache_dir"):
+                common["cache_dir"] = self.cfg["cache_dir"]
+            tok_kw, model_kw = dict(common), dict(common)
+            if self.cfg.get("tokenizer_revision"):
+                tok_kw["revision"] = self.cfg["tokenizer_revision"]
+            if self.cfg.get("model_revision"):
+                model_kw["revision"] = self.cfg["model_revision"]
             tokenizer = KronosTokenizer.from_pretrained(
-                self.cfg.get("tokenizer_name", "NeoQuasar/Kronos-Tokenizer-base")
+                self.cfg.get("tokenizer_path") or self.cfg.get("tokenizer_name", "NeoQuasar/Kronos-Tokenizer-base"), **tok_kw
             )
             model = Kronos.from_pretrained(
-                self.cfg.get("model_name", "NeoQuasar/Kronos-small")
+                self.cfg.get("model_path") or self.cfg.get("model_name", "NeoQuasar/Kronos-base"), **model_kw
             )
             device = self.cfg.get("device", "cpu")
             model.to(device)
+            model.eval()
+            tokenizer.eval()
 
             self.predictor = KronosPredictor(
                 model=model,
@@ -142,9 +146,10 @@ class KronosAdapter:
             # Было: print(...) + traceback.print_exc() в критическом пути —
             # диагностика уходила мимо логов и не попадала в журнал прод-запуска.
             logger.warning(
-                "Kronos недоступен (%s: %s) — MOCK-режим, прогнозы синтетические",
+                "Kronos недоступен (%s: %s); реальный прогноз отключён",
                 type(exc).__name__, exc, exc_info=True,
             )
+            self.load_error = f"{type(exc).__name__}: {exc}"
             self.predictor = None
             self.is_mock = True
 
@@ -154,6 +159,8 @@ class KronosAdapter:
         self,
         kline_df: "pd.DataFrame | pd.Series",
         ticker: str = "",
+        *, prediction_length: int | None = None, sample_count: int | None = None,
+        future_timestamps=None,
     ) -> KronosState:
         """
         Принимает DataFrame[open,high,low,close,volume] или pd.Series (close-only).
@@ -167,7 +174,12 @@ class KronosAdapter:
         бэктеста, остаётся на вызывающей стороне (см. К5 в review_core.md —
         BacktestEngine отдаёт стратегии всю историю целиком).
         """
-        pred_len = int(self.cfg.get("prediction_length", 120))
+        if self.predictor is None and not self.cfg.get("allow_mock", False):
+            raise RuntimeError("Real Kronos unavailable: " + str(self.load_error or "not loaded"))
+        pred_len = int(prediction_length if prediction_length is not None else self.cfg.get("prediction_length", 120))
+        samples = int(sample_count if sample_count is not None else self.cfg.get("sample_count", 8))
+        if not 1 <= pred_len <= 512 or not 1 <= samples <= 64:
+            raise ValueError("prediction_length must be 1..512; sample_count 1..64")
 
         # ── нормализация входа ─────────────────────────────────────────────
         if isinstance(kline_df, pd.Series):
@@ -205,7 +217,17 @@ class KronosAdapter:
                 f"{len(df)} баров < минимума {MIN_CONTEXT_BARS}"
             )
 
-        lookback  = min(len(df), int(self.cfg.get("max_context", 512)))
+        if df["timestamps"].isna().any() or df["timestamps"].duplicated().any():
+            raise ValueError("Kronos timestamps must be nonempty and unique")
+        required = ["open", "high", "low", "close", "volume"]
+        if not np.isfinite(df[required].to_numpy(dtype=float)).all():
+            raise ValueError("Kronos input contains nonfinite OHLCV")
+        if (df[["open", "high", "low", "close"]] <= 0).any().any() or (df["volume"] < 0).any():
+            raise ValueError("Kronos requires positive prices and nonnegative volume")
+        max_context = int(self.cfg.get("max_context", 512))
+        if not 2 <= max_context <= 512:
+            raise ValueError("max_context must be 2..512")
+        lookback = min(len(df), max_context)
         cols      = ["open", "high", "low", "close", "volume"]
         if "amount" in df.columns:
             cols.append("amount")
@@ -228,7 +250,12 @@ class KronosAdapter:
         else:
             freq = pd.Timedelta(hours=1)  # fallback
 
-        future_index = pd.date_range(start=last_ts + freq, periods=pred_len, freq=freq)
+        if freq <= pd.Timedelta(0):
+            raise ValueError("Kronos requires increasing timestamps")
+        future_index = (pd.DatetimeIndex(pd.to_datetime(future_timestamps)) if future_timestamps is not None
+                        else pd.date_range(start=last_ts + freq, periods=pred_len, freq=freq))
+        if len(future_index) != pred_len or not future_index.is_monotonic_increasing or future_index.has_duplicates or future_index[0] <= last_ts:
+            raise ValueError("Invalid future timestamps")
         y_timestamp = pd.Series(future_index, name="timestamps")
 
         # ── mock ───────────────────────────────────────────────────────────
@@ -246,16 +273,21 @@ class KronosAdapter:
             )
 
         # ── реальный predict ───────────────────────────────────────────────
-        pred_df = self.predictor.predict(
-            df=x_df,
-            x_timestamp=x_timestamp,
-            y_timestamp=y_timestamp,
-            pred_len=pred_len,
-            T=float(self.cfg.get("temperature", 1.0)),
-            top_p=float(self.cfg.get("top_p", 0.9)),
-            sample_count=int(self.cfg.get("sample_count", 8)),
-            verbose=False,
-        )
+        with self._predict_lock:
+            pred_df = self.predictor.predict(
+                df=x_df,
+                x_timestamp=x_timestamp,
+                y_timestamp=y_timestamp,
+                pred_len=pred_len,
+                T=float(self.cfg.get("temperature", 1.0)),
+                top_p=float(self.cfg.get("top_p", 0.9)),
+                sample_count=samples,
+                verbose=False,
+            )
+        values = pred_df[["open", "high", "low", "close"]].to_numpy(dtype=float)
+        if len(pred_df) != pred_len or not np.isfinite(values).all() or (values <= 0).any():
+            raise ValueError("Kronos returned invalid forecast values")
+
 
         return KronosState(
             ticker=ticker,

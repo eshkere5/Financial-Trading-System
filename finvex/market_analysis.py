@@ -534,41 +534,9 @@ def tech_module(full: pd.DataFrame, view: pd.DataFrame, symbol: str, tf: str) ->
 
 
 # ───────────────────────── модуль 1: Kronos ─────────────────────────
-_KRONOS: dict[str, Any] = {}
-
-
 def kronos_module(full: pd.DataFrame, symbol: str, tf: str, samples: int) -> dict[str, Any]:
-    try:
-        if "ad" not in _KRONOS:
-            from finvex.analysis.kronos.adapter import KronosAdapter
-            from finvex.engine.config_loader import load_kronos_config
-            _KRONOS["ad"] = KronosAdapter(load_kronos_config("configs/kronos.yaml"))
-        ad = _KRONOS["ad"]
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "error": f"Kronos не загрузился: {exc}"}
-    if getattr(ad, "is_mock", False):
-        return {"status": "mock", "error": "Kronos в mock-режиме (модель не загружена) - прогноз пропущен"}
-    horizon = 10 if tf == "1d" else 24
-    try:
-        ad.cfg["prediction_length"] = horizon
-        ad.cfg["sample_count"] = samples
-        cols = [c for c in ("timestamps", "open", "high", "low", "close", "volume", "amount") if c in full.columns]
-        ctx = full[cols].tail(min(400, len(full))).reset_index(drop=True)
-        t0 = time.time()
-        st = ad.encode_prices(ctx, symbol)
-        fc = np.asarray(st.forecast_close, dtype=float)
-        if len(fc) == 0 or not np.isfinite(fc).all():
-            return {"status": "error", "error": "Kronos вернул некорректный прогноз"}
-        last = float(ctx["close"].iloc[-1])
-        change, voln = float(fc[-1] / last - 1), float(st.volatility_norm)
-        return {"status": "ok", "horizon": horizon, "last": last, "target": float(fc[-1]), "change": change,
-                "expected_return": float(st.expected_return), "confidence": float(st.confidence),
-                "direction": int(st.direction), "volatility_norm": voln, "seconds": round(time.time() - t0, 1),
-                "forecast_close": fc.tolist(), "forecast_high": np.asarray(st.forecast_high, dtype=float).tolist(),
-                "forecast_low": np.asarray(st.forecast_low, dtype=float).tolist(),
-                "score": float(np.tanh(change / max(voln, 1e-4)))}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "error": f"ошибка прогноза Kronos: {exc}"}
+    from finvex.analysis.kronos.service import get_service
+    return get_service().forecast(full, symbol, tf, samples)
 
 
 # ───────────────────────── модуль 3: новости ─────────────────────────

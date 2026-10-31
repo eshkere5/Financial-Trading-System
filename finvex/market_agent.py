@@ -72,6 +72,13 @@ class Session:
     turn_images: list[Path] = field(default_factory=list)
     analyzer: Any = None
     sandbox: Any = None
+    kronos_call: Any = None
+
+    def forecast(self, df, symbol, tf="1d", samples=3):
+        if not self.use_kronos:
+            return {"status": "disabled", "error": "TSFM disabled for this session"}
+        fn = self.kronos_call or ma.kronos_module
+        return fn(df, symbol, tf, samples)
 
     @property
     def now(self) -> datetime:
@@ -338,7 +345,7 @@ def recipe_analyze(sess: Session, instrument: str, period: Any = None, timeframe
     tech["volume_ratio_last5"] = float(vol.tail(5).mean() / vol.mean()) if vol.mean() else None
     tech.pop("last_volume_ratio", None)
     if "kronos" in modules and sess.use_kronos:
-        kr = ma.kronos_module(df, inst.symbol, tf, 3)
+        kr = sess.forecast(df, inst.symbol, tf, 3)
         if kr.get("status") == "ok":
             kr["channel_tightness"] = kr.pop("confidence")
             kr["score"] = 0.7 * float(np.tanh(kr["change"] / (2 * max(kr["volatility_norm"], 1e-4))))
@@ -470,7 +477,7 @@ class Sandbox:
         self.ns: dict[str, Any] = {
             "pd": pd, "np": np, "plt": plt, "math": math, "datetime": datetime, "timedelta": timedelta, "MSK": MSK, "re": re, "json": json,
             "NOW": s.now, "candles": h_candles, "closes": h_closes, "universe": h_universe, "resolve": h_resolve, "regime": h_regime,
-            "kronos": lambda df, symbol, tf="1d", samples=3: ma.kronos_module(df, symbol, tf, samples), "news": h_news, "analyze": h_analyze,
+            "kronos": s.forecast, "news": h_news, "analyze": h_analyze,
             "scan": lambda **kw: recipe_scan(s, **kw), "coint": lambda **kw: recipe_coint(s, **kw), "indicators": ma.add_indicators, "rsi": ma.rsi,
             "http_get_json": ma._http_get_json, "engle_granger": st.engle_granger, "cluster_by_corr": st.cluster_by_corr,
             "scan_cointegration": st.scan_cointegration, "trend_snapshot": st.trend_snapshot, "rank_trends": st.rank_trends, "last_scan": lambda: s.last_scan}

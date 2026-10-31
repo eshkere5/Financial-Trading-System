@@ -1,0 +1,12 @@
+{
+  "upstream": "https://github.com/shiyu-coder/Kronos",
+  "license": "MIT (see LICENSE)",
+  "source_archive": "finvex_20261031_032509.zip",
+  "upstream_commit": null,
+  "note": "Upstream commit was not present in the uploaded ZIP; not inferred. One import changed to relative. Inference source only; no weights.",
+  "original_sha256": {
+    "__init__.py": "f8f856ca3fedadcaac97e196be23d1aeda1c3c9ffe8903d66d43ea3bcac6240c",
+    "kronos.py": "0a5f90282e2039c2de0771473419715c845def154896dbd0f5747837e6241032",
+    "module.py": "a07edbadc0e96804c8158c021bbc6063bb7cc43b34d7fc470d5c8ff2005a409f"
+  }
+}
