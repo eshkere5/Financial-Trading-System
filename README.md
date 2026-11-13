@@ -1,3 +1,60 @@
+<h1 align="center">Finvex</h1>
+
+<p align="center">
+  <b>A modular platform for controlling and improving AI agents in financial workflows.</b>
+</p>
+
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-B79855?style=flat-square&labelColor=202725">
+  <img alt="Status" src="https://img.shields.io/badge/status-technical%20MVP-B79855?style=flat-square&labelColor=202725">
+  <img alt="Mode" src="https://img.shields.io/badge/mode-sandbox%20%2F%20testnet-B79855?style=flat-square&labelColor=202725">
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshot-verdicts.png" alt="Finvex: gateway verdicts" width="900">
+</p>
+
+> **Status:** technical MVP. Real broker and exchange connections and live order execution are not implemented. Everything runs in demo, sandbox or testnet mode. The screenshots show demo mode with synthetic data.
+
+## What it does
+
+- **Connect agents** over HTTP API or MCP.
+- **Check every decision** in the gateway: allowed, revise, or rejected, with reasons.
+- **Control the rules** (risk limits, position size, trading session, regime filters) from the UI. An agent cannot change or bypass them.
+- **Test in a sandbox** where agents always run in check-only mode and no orders are sent.
+- **Keep a verdict journal** for review and improvement. The final call stays with a human.
+
+## Screenshots
+
+| Verdicts | Rules |
+| --- | --- |
+| <img src="docs/assets/screenshot-verdicts.png" alt="Verdicts"> | <img src="docs/assets/screenshot-rules.png" alt="Rules"> |
+
+| Sandbox | Modules |
+| --- | --- |
+| <img src="docs/assets/screenshot-sandbox.png" alt="Sandbox"> | <img src="docs/assets/screenshot-modules.png" alt="Modules"> |
+
+| Chat | Settings |
+| --- | --- |
+| <img src="docs/assets/screenshot-chat.png" alt="Chat"> | <img src="docs/assets/screenshot-settings.png" alt="Settings"> |
+
+The interface is currently in Russian; the screenshots above are translated for illustration.
+
+## Architecture
+
+Four modules, each enabled and disabled independently: data and execution adapters, analytics, the guard layer, and the agent hub. The guard layer depends on adapters, and the hub depends on the guard layer.
+
+## Quick start
+
+```powershell
+python -m pip install -e ".[dev,crypto]"
+python -m finvex.web --demo --open
+```
+
+Open `http://127.0.0.1:8765/`. The demo uses synthetic market data and needs no exchange keys. Full setup instructions (in Russian) follow below.
+
+---
+
 # Finvex
 
 ## TSFM / Kronos в этой поставке
